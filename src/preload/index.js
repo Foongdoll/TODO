@@ -4,9 +4,12 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 const api = {
   todos: {
-    load: () => ipcRenderer.invoke("todos:load"),
-    save: (db) => ipcRenderer.invoke("todos:save", db),
+    summary: () => ipcRenderer.invoke("todos:summary"),
     revealPath: () => ipcRenderer.invoke("todos:revealPath"),
+    byDate: (selectedDate) => ipcRenderer.invoke("todos:byDate", selectedDate),
+    upsert: (todo) => ipcRenderer.invoke("todos:upsert", todo),
+    delete: (id) => ipcRenderer.invoke("todos:delete", id),
+    updateOrders: (updates) => ipcRenderer.invoke("todos:updateOrders", updates),
   },
   files: {
     saveFromDataUrl: (payload) => ipcRenderer.invoke("files:saveFromDataUrl", payload),

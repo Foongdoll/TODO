@@ -1,5 +1,7 @@
 @tailwind base;
+
 @tailwind components;
+
 @tailwind utilities;
 
 @layer base {
@@ -71,6 +73,20 @@
 
   .markdown li {
     @apply mt-1;
+  }
+
+  .markdown ul,
+  .markdown ol {
+    @apply my-0 pl-5 text-slate-700;
+  }
+
+  .markdown li {
+    @apply mt-0.5;
+  }
+
+  .markdown li ul li,
+  .markdown li ol li {
+    @apply mt-0;
   }
 
   .markdown a {

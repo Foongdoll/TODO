@@ -32,7 +32,6 @@ import {
   FileSpreadsheet,
   FileType,
   FileVideoCamera,
-  FolderOpen,
   GripVertical,
   ListChecks,
   Minus,
@@ -40,12 +39,19 @@ import {
   Square,
   Trash2,
   X,
+  Save,
+  Settings,
+  MessageCircle,
+  Notebook,
 } from "lucide-react";
+import logo from "./assets/logo.png";
+import Calendar, { addMonths, startOfMonth, type TodoSummary } from "./pages/Calendar";
+import Note from "./pages/Note";
+import Chat from "./pages/Chat";
+import SettingPanel from "./pages/SettingPanel";
 
-type TodoDB = { version: 1; updatedAt: string; items: Todo[]; };
-
-type TodoStatus = "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
-type TabKey = "LIST" | "CALENDAR";
+export type TodoStatus = "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
+export type TabKey = "LIST" | "CALENDAR" | "CHAT" | "SETTINGS" | "NOTE";
 
 type TodoRel = { toId: string; type: "blocks" | "relates" | "depends" };
 type LegacyImage = { id: string; name: string; dataUrl: string; createdAt: string; path?: string };
@@ -75,28 +81,12 @@ type Todo = {
   updatedAt: string;
 };
 
-const STORAGE_KEY = "todo-desktop-db";
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 const toYMD = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const nowIso = () => new Date().toISOString();
 const uid = () =>
   globalThis.crypto?.randomUUID?.() ?? `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-
-const dayNames = ["일", "월", "화", "수", "목", "금", "토"];
-
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-function endOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0);
-}
-function addMonths(date: Date, diff: number) {
-  return new Date(date.getFullYear(), date.getMonth() + diff, 1);
-}
-function dayLabel(date: Date) {
-  return dayNames[date.getDay()];
-}
 
 const STATUS_META: Record<TodoStatus, { label: string; badge: string }> = {
   TODO: { label: "할 일", badge: "bg-amber-50 text-amber-800 border-amber-200" },
@@ -116,7 +106,7 @@ function clampText(s: string, max = 40) {
   return t.length <= max ? t : `${t.slice(0, max - 3)}...`;
 }
 
-function cn(...args: Array<string | false | null | undefined>) {
+export function cn(...args: Array<string | false | null | undefined>) {
   return args.filter(Boolean).join(" ");
 }
 
@@ -209,45 +199,45 @@ const hasBridge = typeof window !== "undefined" && Boolean(window.api?.todos);
 const hasWindowBridge = typeof window !== "undefined" && Boolean(window.api?.window);
 const hasFileBridge = typeof window !== "undefined" && Boolean(window.api?.files);
 
-const emptyDb = (): TodoDB => ({
-  version: 1,
-  updatedAt: nowIso(),
-  items: [],
-});
-
-async function loadDb(): Promise<TodoDB> {
-  if (hasBridge) {
-    return window.api.todos.load();
+async function loadTodoSummaries(): Promise<TodoSummary[]> {
+  if (hasBridge && window.api.todos.summary) {
+    const items = await window.api.todos.summary();
+    return (items ?? []).map((item: TodoSummary) => normalizeSummary(item));
   }
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return emptyDb();
-    const data = JSON.parse(raw) as TodoDB;
-    if (!data || data.version !== 1 || !Array.isArray(data.items)) return emptyDb();
-    return data;
-  } catch {
-    return emptyDb();
+  return [];
+}
+
+async function loadTodosByDate(selectedDate: string): Promise<Todo[]> {
+  if (hasBridge && window.api.todos.byDate) {
+    const items = await window.api.todos.byDate(selectedDate);
+    return (items ?? []).map((item: Todo) => normalizeTodo(item));
+  }
+  return [];
+}
+
+async function upsertTodo(nextTodo: Todo): Promise<void> {
+  if (hasBridge && window.api.todos.upsert) {
+    await window.api.todos.upsert(nextTodo);
   }
 }
 
-async function saveDb(db: TodoDB): Promise<TodoDB> {
-  const next: TodoDB = { ...db, version: 1, updatedAt: nowIso() };
-  if (hasBridge) {
-    return window.api.todos.save(next);
+async function deleteTodoById(id: string): Promise<void> {
+  if (hasBridge && window.api.todos.delete) {
+    await window.api.todos.delete(id);
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  } catch {
-    // ignore localStorage failures
+}
+
+async function updateTodoOrders(updates: Array<{ id: string; order: number; updatedAt: string }>): Promise<void> {
+  if (hasBridge && window.api.todos.updateOrders) {
+    await window.api.todos.updateOrders(updates);
   }
-  return next;
 }
 
 async function revealStoragePath(): Promise<string> {
   if (hasBridge) {
     return window.api.todos.revealPath();
   }
-  return `로컬저장소:${STORAGE_KEY}`;
+  return "Bridge unavailable";
 }
 
 function normalizeAttachment(raw: Partial<TodoAttachment> & { dataUrl?: string }): TodoAttachment | null {
@@ -294,6 +284,33 @@ function normalizeTodo(raw: Todo): Todo {
     refs: Array.isArray(raw.refs) ? raw.refs : [],
     rels: Array.isArray(raw.rels) ? raw.rels : [],
     attachments: [...normalizedAttachments, ...legacyAttachments],
+  };
+}
+
+function toSummary(todo: Todo): TodoSummary {
+  return {
+    id: todo.id,
+    title: todo.title,
+    status: todo.status,
+    date: todo.date,
+    order: todo.order,
+    createdAt: todo.createdAt,
+    updatedAt: todo.updatedAt,
+  };
+}
+
+function normalizeSummary(raw: TodoSummary): TodoSummary {
+  const status = (raw.status === "TODO" || raw.status === "IN_PROGRESS" || raw.status === "BLOCKED" || raw.status === "DONE")
+    ? raw.status
+    : "TODO";
+  return {
+    id: String(raw.id ?? uid()),
+    title: String(raw.title ?? ""),
+    status,
+    date: String(raw.date ?? ""),
+    order: Number.isFinite(raw.order) ? raw.order : 0,
+    createdAt: String(raw.createdAt ?? nowIso()),
+    updatedAt: String(raw.updatedAt ?? nowIso()),
   };
 }
 
@@ -361,129 +378,6 @@ function SortableTodoRow({
   );
 }
 
-function Calendar({
-  month,
-  selectedDate,
-  todosByDate,
-  onPickDate,
-  onPrevMonth,
-  onNextMonth,
-}: {
-  month: Date;
-  selectedDate: string;
-  todosByDate: Map<string, Todo[]>;
-  onPickDate: (ymd: string) => void;
-  onPrevMonth: () => void;
-  onNextMonth: () => void;
-}) {
-  const first = startOfMonth(month);
-  const last = endOfMonth(month);
-
-  const startPad = first.getDay();
-  const totalDays = last.getDate();
-
-  const cells: Array<{ ymd: string; day: number; inMonth: boolean }> = [];
-
-  for (let i = 0; i < startPad; i++) {
-    const d = new Date(first);
-    d.setDate(d.getDate() - (startPad - i));
-    cells.push({ ymd: toYMD(d), day: d.getDate(), inMonth: false });
-  }
-  for (let day = 1; day <= totalDays; day++) {
-    const d = new Date(first.getFullYear(), first.getMonth(), day);
-    cells.push({ ymd: toYMD(d), day, inMonth: true });
-  }
-  while (cells.length < 42) {
-    const d = new Date(last);
-    d.setDate(d.getDate() + (cells.length - (startPad + totalDays) + 1));
-    cells.push({ ymd: toYMD(d), day: d.getDate(), inMonth: false });
-  }
-
-  const monthTitle = `${month.getFullYear()}-${pad2(month.getMonth() + 1)}`;
-
-  return (
-    <div className="rounded-2xl border border-slate-200/70 bg-white/80 p-4 shadow-sm">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-semibold text-slate-900">캘린더</div>
-        <div className="flex items-center gap-2">
-          <button
-            className="rounded-xl border border-slate-200 bg-white px-3 py-1 text-sm hover:bg-slate-50"
-            onClick={onPrevMonth}
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <div className="min-w-[90px] text-center text-sm font-medium text-slate-700">{monthTitle}</div>
-          <button
-            className="rounded-xl border border-slate-200 bg-white px-3 py-1 text-sm hover:bg-slate-50"
-            onClick={onNextMonth}
-          >
-            <ChevronRight size={16} />
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-7 gap-2 text-xs text-slate-500">
-        {dayNames.map((w) => (
-          <div key={w} className="px-2 py-1 text-center font-medium">
-            {w}
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-2 grid grid-cols-7 gap-2">
-        {cells.map((c) => {
-          const list = todosByDate.get(c.ymd) ?? [];
-          const top = list
-            .slice()
-            .sort((a, b) => a.order - b.order)
-            .slice(0, 3);
-
-          const isSelected = c.ymd === selectedDate;
-          const isToday = c.ymd === toYMD(new Date());
-
-          return (
-            <button
-              key={c.ymd}
-              onClick={() => onPickDate(c.ymd)}
-              className={cn(
-                "rounded-xl border p-2 text-left transition",
-                c.inMonth ? "border-slate-200 bg-white hover:bg-slate-50" : "border-slate-100 bg-slate-50/60",
-                isSelected && "ring-2 ring-slate-300",
-                isToday && "border-slate-300"
-              )}
-              title={`${c.ymd} (${dayLabel(new Date(c.ymd))})`}
-            >
-              <div
-                className={cn(
-                  "flex items-center justify-between text-xs",
-                  c.inMonth ? "text-slate-700" : "text-slate-400"
-                )}
-              >
-                <span className="font-medium">{c.day}</span>
-                <span className="text-[10px] text-slate-400">{list.length ? `${list.length}건` : ""}</span>
-              </div>
-
-              <div className="mt-2 space-y-1">
-                {top.map((t) => (
-                  <div
-                    key={t.id}
-                    className={cn("truncate rounded-lg border px-2 py-1 text-[11px]", STATUS_META[t.status].badge)}
-                    title={t.title}
-                  >
-                    {t.title || "제목 없음"}
-                  </div>
-                ))}
-                {list.length > 3 && <div className="text-[11px] text-slate-400">+ {list.length - 3}건</div>}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="mt-3 text-xs text-slate-500">날짜를 클릭하면 해당 목록으로 이동합니다.</div>
-    </div>
-  );
-}
 
 function TitleBar() {
   const [isMax, setIsMax] = React.useState(false);
@@ -508,8 +402,10 @@ function TitleBar() {
     <div className="sticky top-0 z-50 border-b border-slate-200/70 bg-white/80 backdrop-blur">
       <div className="titlebar-drag flex h-11 items-center justify-between px-3">
         <div className="flex items-center gap-2">
-          <div className="h-7 w-7 rounded-2xl border border-slate-200 bg-white shadow-sm" />
-          <div className="text-sm font-semibold text-slate-900">업무 TODO</div>
+          <div className="h-7 w-7 rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <img src={logo} alt="Logo" className="rounded-2xl" />
+          </div>
+          <div className="text-sm font-semibold text-slate-900">TODOONG 'S</div>
         </div>
 
         <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
@@ -560,9 +456,9 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => startOfMonth(new Date()));
-  const [todos, setTodos] = useState<Todo[]>([]);
+  const [dayTodos, setDayTodos] = useState<Todo[]>([]);
+  const [summaryTodos, setSummaryTodos] = useState<TodoSummary[]>([]);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
-  const [hydrated, setHydrated] = useState(false);
   const [storagePath, setStoragePath] = useState<string>("");
   const [storageNotice, setStorageNotice] = useState<string>("");
   const [uploadNotice, setUploadNotice] = useState<string>("");
@@ -572,30 +468,33 @@ export default function App() {
   const [relTargetId, setRelTargetId] = useState<string>("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const dayTodosRef = useRef<Todo[]>([]);
+  const pendingSavesRef = useRef<Map<string, Todo>>(new Map());
+  const saveTimersRef = useRef<Map<string, number>>(new Map());
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
-  const selectedTodo = useMemo(() => todos.find((t) => t.id === selectedId) ?? null, [todos, selectedId]);
+  const selectedTodo = useMemo(() => dayTodos.find((t) => t.id === selectedId) ?? null, [dayTodos, selectedId]);
   const selectedAttachments = selectedTodo?.attachments ?? [];
   const imageAttachments = selectedAttachments.filter((att) => att.kind === "image");
   const fileAttachments = selectedAttachments.filter((att) => att.kind === "file");
 
   const todosForDay = useMemo(() => {
-    return todos
+    return dayTodos
       .filter((t) => t.date === selectedDate)
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
-  }, [todos, selectedDate]);
+  }, [dayTodos, selectedDate]);
 
   const todosByDate = useMemo(() => {
-    const m = new Map<string, Todo[]>();
-    for (const t of todos) {
+    const m = new Map<string, TodoSummary[]>();
+    for (const t of summaryTodos) {
       const arr = m.get(t.date) ?? [];
       arr.push(t);
       m.set(t.date, arr);
     }
     return m;
-  }, [todos]);
+  }, [summaryTodos]);
 
   const dayCounts = useMemo(() => {
     const counts: Record<TodoStatus, number> = {
@@ -614,12 +513,12 @@ export default function App() {
 
   const referenceCandidates = useMemo(() => {
     const query = refSearch.trim().toLowerCase();
-    return todos
+    return summaryTodos
       .filter((t) => t.id !== selectedId)
       .filter((t) => !query || (t.title || "").toLowerCase().includes(query))
       .slice()
       .sort((a, b) => b.date.localeCompare(a.date) || a.order - b.order || a.createdAt.localeCompare(b.createdAt));
-  }, [todos, selectedId, refSearch]);
+  }, [summaryTodos, selectedId, refSearch]);
 
   const visibleReferenceCandidates = useMemo(() => {
     return referenceCandidates.slice(0, refPage * REF_PAGE_SIZE);
@@ -628,13 +527,15 @@ export default function App() {
   const hasMoreReferences = visibleReferenceCandidates.length < referenceCandidates.length;
 
   useEffect(() => {
+    dayTodosRef.current = dayTodos;
+  }, [dayTodos]);
+
+  useEffect(() => {
     let active = true;
     (async () => {
-      const db = await loadDb();
+      const items = await loadTodoSummaries();
       if (!active) return;
-      const items = (db.items ?? []).map((item: any) => normalizeTodo(item));
-      setTodos(items);
-      setHydrated(true);
+      setSummaryTodos(items);
     })();
     return () => {
       active = false;
@@ -642,12 +543,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
-    const t = setTimeout(() => {
-      void saveDb({ version: 1, updatedAt: nowIso(), items: todos });
-    }, 400);
-    return () => clearTimeout(t);
-  }, [todos, hydrated]);
+    let active = true;
+    (async () => {
+      try {
+        await flushPendingSaves();
+      } catch {
+        // ignore save flush failures
+      }
+      const items = await loadTodosByDate(selectedDate);
+      if (!active) return;
+      setDayTodos(items);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedDate]);
 
   useEffect(() => {
     setCalendarMonth(startOfMonth(new Date(selectedDate)));
@@ -659,12 +569,12 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedId) return;
-    const match = todos.find((t) => t.id === selectedId);
+    const match = dayTodos.find((t) => t.id === selectedId);
     if (!match || match.date !== selectedDate) {
       setSelectedId(null);
       setPanelOpen(false);
     }
-  }, [selectedDate, selectedId, todos]);
+  }, [selectedDate, selectedId, dayTodos]);
 
   useEffect(() => {
     setRelType("depends");
@@ -676,6 +586,67 @@ export default function App() {
     const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 16;
     if (!nearBottom) return;
     setRefPage((prev) => (prev * REF_PAGE_SIZE < referenceCandidates.length ? prev + 1 : prev));
+  };
+
+  const getTodoById = (id: string) =>
+    dayTodosRef.current.find((t) => t.id === id) ?? (selectedTodo?.id === id ? selectedTodo : null);
+
+  const scheduleUpsert = (todo: Todo) => {
+    pendingSavesRef.current.set(todo.id, todo);
+    const timers = saveTimersRef.current;
+    const existing = timers.get(todo.id);
+    if (existing) window.clearTimeout(existing);
+    const handle = window.setTimeout(() => {
+      timers.delete(todo.id);
+      const latest = pendingSavesRef.current.get(todo.id);
+      if (!latest) return;
+      pendingSavesRef.current.delete(todo.id);
+      void upsertTodo(latest).catch(() => { });
+    }, 500);
+    timers.set(todo.id, handle);
+  };
+
+  const clearPendingSave = (id: string) => {
+    pendingSavesRef.current.delete(id);
+    const timers = saveTimersRef.current;
+    const existing = timers.get(id);
+    if (existing) {
+      window.clearTimeout(existing);
+      timers.delete(id);
+    }
+  };
+
+  const flushPendingSaves = async () => {
+    const timers = saveTimersRef.current;
+    for (const handle of timers.values()) {
+      window.clearTimeout(handle);
+    }
+    timers.clear();
+
+    const pending = Array.from(pendingSavesRef.current.values());
+    pendingSavesRef.current.clear();
+    if (!pending.length) return;
+    await Promise.all(pending.map((todo) => upsertTodo(todo)));
+  };
+
+  const upsertSummary = (todo: Todo) => {
+    const summary = toSummary(todo);
+    setSummaryTodos((prev) => {
+      const idx = prev.findIndex((t) => t.id === summary.id);
+      if (idx === -1) return [...prev, summary];
+      const next = prev.slice();
+      next[idx] = { ...next[idx], ...summary };
+      return next;
+    });
+  };
+
+  const applyTodoUpdate = (todo: Todo) => {
+    setDayTodos((prev) => {
+      const next = prev.map((t) => (t.id === todo.id ? todo : t));
+      return next.filter((t) => t.date === selectedDate);
+    });
+    upsertSummary(todo);
+    scheduleUpsert(todo);
   };
 
   const openPanel = (id: string) => {
@@ -711,24 +682,34 @@ export default function App() {
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
-    setTodos((prev) => [...prev, t]);
+    setDayTodos((prev) => [...prev, t]);
+    setSummaryTodos((prev) => [...prev, toSummary(t)]);
+    scheduleUpsert(t);
     setSelectedId(t.id);
     setPanelOpen(true);
   };
 
   const patchTodo = (id: string, patch: Partial<Todo>) => {
-    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch, updatedAt: nowIso() } : t)));
+    const current = getTodoById(id);
+    if (!current) return;
+    const updated = { ...current, ...patch, updatedAt: nowIso() };
+    applyTodoUpdate(updated);
+    if (patch.date && patch.date !== selectedDate) {
+      setSelectedId(null);
+      setPanelOpen(false);
+    }
   };
 
   const deleteTodo = (id: string) => {
 
     if (!confirm("해당 할 일을 삭제하시겠습니까?")) return;
 
-    const target = todos.find((t) => t.id === id);
+    clearPendingSave(id);
+    const target = getTodoById(id);
     if (target) {
       void purgeAttachments(target.attachments);
     }
-    setTodos((prev) => {
+    setDayTodos((prev) => {
       const filtered = prev.filter((t) => t.id !== id);
       return filtered.map((t) => ({
         ...t,
@@ -736,10 +717,11 @@ export default function App() {
         rels: t.rels.filter((r) => r.toId !== id),
       }));
     });
+    setSummaryTodos((prev) => prev.filter((t) => t.id !== id));
+    void deleteTodoById(id).catch(() => { });
     setSelectedId(null);
     setPanelOpen(false);
   };
-
   const onDragStart = (event: DragStartEvent) => {
     setActiveDragId(String(event.active.id));
   };
@@ -758,46 +740,42 @@ export default function App() {
     const oldIndex = dayIds.indexOf(activeId);
     const newIndex = dayIds.indexOf(overId);
     const movedIds = arrayMove(dayIds, oldIndex, newIndex);
-
-    setTodos((prev) => {
-      const next = prev.slice();
-      const map = new Map<string, number>();
-      movedIds.forEach((id, idx) => map.set(id, idx));
-      for (let i = 0; i < next.length; i++) {
-        const t = next[i];
-        if (t.date === selectedDate && map.has(t.id)) {
-          next[i] = { ...t, order: map.get(t.id)!, updatedAt: nowIso() };
-        }
-      }
-      return next;
-    });
+    const updatedAt = nowIso();
+    const map = new Map<string, number>();
+    movedIds.forEach((id, idx) => map.set(id, idx));
+    setDayTodos((prev) =>
+      prev.map((t) => (map.has(t.id) ? { ...t, order: map.get(t.id)!, updatedAt } : t))
+    );
+    setSummaryTodos((prev) =>
+      prev.map((t) => (map.has(t.id) ? { ...t, order: map.get(t.id)!, updatedAt } : t))
+    );
+    const updates = movedIds.map((id) => ({ id, order: map.get(id)!, updatedAt }));
+    void updateTodoOrders(updates).catch(() => { });
   };
 
   const updateAttachment = (todoId: string, attachmentId: string, patch: Partial<TodoAttachment>) => {
-    setTodos((prev) =>
-      prev.map((t) =>
-        t.id === todoId
-          ? {
-            ...t,
-            attachments: t.attachments.map((att) => (att.id === attachmentId ? { ...att, ...patch } : att)),
-            updatedAt: nowIso(),
-          }
-          : t
-      )
-    );
+    const current = getTodoById(todoId);
+    if (!current) return;
+    const updated = {
+      ...current,
+      attachments: current.attachments.map((att) => (att.id === attachmentId ? { ...att, ...patch } : att)),
+      updatedAt: nowIso(),
+    };
+    applyTodoUpdate(updated);
   };
 
   const removeAttachment = async (todoId: string, attachment: TodoAttachment) => {
     if (hasFileBridge && attachment.path && !attachment.path.startsWith("data:")) {
       await window.api.files.delete(attachment.path);
     }
-    setTodos((prev) =>
-      prev.map((t) =>
-        t.id === todoId
-          ? { ...t, attachments: t.attachments.filter((att) => att.id !== attachment.id), updatedAt: nowIso() }
-          : t
-      )
-    );
+    const current = getTodoById(todoId);
+    if (!current) return;
+    const updated = {
+      ...current,
+      attachments: current.attachments.filter((att) => att.id !== attachment.id),
+      updatedAt: nowIso(),
+    };
+    applyTodoUpdate(updated);
   };
 
   const openAttachment = async (todoId: string, attachment: TodoAttachment) => {
@@ -888,18 +866,26 @@ export default function App() {
       })
     );
 
-    setTodos((prev) =>
-      prev.map((t) =>
-        t.id === todoId
-          ? { ...t, attachments: [...t.attachments, ...nextAttachments], updatedAt: nowIso() }
-          : t
-      )
-    );
+    const current = getTodoById(todoId);
+    if (!current) return;
+    const updated = {
+      ...current,
+      attachments: [...current.attachments, ...nextAttachments],
+      updatedAt: nowIso(),
+    };
+    applyTodoUpdate(updated);
   };
 
   const handleRevealStorage = async () => {
-    const path = await revealStoragePath();
-    setStoragePath(path);
+    var path = "";
+    if (storagePath) {
+      setStoragePath("");
+      return;
+    } else {
+      path = await revealStoragePath();
+      setStoragePath(path);
+    }
+
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(path);
@@ -926,10 +912,12 @@ export default function App() {
       <div className="sticky top-0 z-10 border-b border-slate-200/70 bg-white/70 backdrop-blur">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-2xl border border-slate-200 bg-white shadow-sm" />
+            <div className="h-10 w-10 rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <img src={logo} alt="Logo" className="rounded-2xl" />
+            </div>
             <div>
-              <div className="text-sm font-semibold text-slate-900">업무 TODO</div>
-              <div className="text-xs text-slate-500">메모, 관계, 캘린더로 일정을 관리하세요.</div>
+              <div className="text-sm font-semibold text-slate-900">TODOONG 'S</div>
+              <div className="text-xs text-slate-500">TODO, 캘린더, 노트, 채팅을 한번에 활용해보세요.</div>
             </div>
           </div>
 
@@ -959,12 +947,40 @@ export default function App() {
               캘린더
             </button>
             <button
-              onClick={handleRevealStorage}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
-              title="저장 위치 보기"
+              onClick={() => setTab("NOTE")}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm",
+                tab === "NOTE"
+                  ? "border-slate-900/30 bg-slate-900 text-white"
+                  : "border-slate-200 bg-white hover:bg-slate-50"
+              )}
             >
-              <FolderOpen size={16} />
-              저장 위치
+              <Notebook size={16} />
+              노트
+            </button>
+            <button
+              onClick={() => setTab("CHAT")}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm",
+                tab === "CHAT"
+                  ? "border-slate-900/30 bg-slate-900 text-white"
+                  : "border-slate-200 bg-white hover:bg-slate-50"
+              )}
+            >
+              <MessageCircle size={16} />
+              채팅
+            </button>
+            <button
+              onClick={() => setTab("SETTINGS")}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm",
+                tab === "SETTINGS"
+                  ? "border-slate-900/30 bg-slate-900 text-white"
+                  : "border-slate-200 bg-white hover:bg-slate-50"
+              )}
+            >
+              <Settings size={16} />
+              설정
             </button>
           </div>
         </div>
@@ -1070,7 +1086,7 @@ export default function App() {
                   <DragOverlay>
                     {activeDragId ? (
                       <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow">
-                        {todos.find((t) => t.id === activeDragId)?.title || "드래그 중"}
+                        {dayTodos.find((t) => t.id === activeDragId)?.title || "드래그 중"}
                       </div>
                     ) : null}
                   </DragOverlay>
@@ -1091,6 +1107,17 @@ export default function App() {
               onNextMonth={() => setCalendarMonth((m) => addMonths(m, +1))}
             />
           )}
+
+          {tab === "NOTE" && (
+            <Note />
+          )}
+
+          {tab === "CHAT" && (
+            <Chat />
+          )}
+          {tab === "SETTINGS" && (
+            <SettingPanel />
+          )}
         </div>
         <div className="relative">
           <div
@@ -1103,7 +1130,7 @@ export default function App() {
           />
           <div
             className={cn(
-              "fixed right-0 top-11 z-40 h-[calc(100%-44px)] w-full transition-transform duration-300 ease-out sm:w-[420px] md:w-[480px]",
+              "fixed right-0 top-11 z-40 h-[calc(100%-44px)] w-full transition-transform duration-300 ease-out sm:w-[520px] md:w-[580px]",
               panelOpen ? "translate-x-0" : "translate-x-full pointer-events-none"
             )}
             aria-hidden={!panelOpen}
@@ -1168,20 +1195,18 @@ export default function App() {
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <label className="text-xs font-medium text-slate-700">내용 (Markdown)</label>
-                        <div className="text-[11px] text-slate-500">실시간으로 미리보기가 갱신됩니다.</div>
+                        <label className="text-xs font-medium text-slate-700">내용</label>
                       </div>
 
                       <textarea
                         value={selectedTodo.content}
                         onChange={(e) => patchTodo(selectedTodo.id, { content: e.target.value })}
                         className="h-32 w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                        placeholder="마크다운으로 내용을 작성하세요. (체크리스트, 코드블록 등)"
+                        placeholder="내용을 입력하세요."
                       />
-
                       <div className="rounded-2xl border border-slate-200 bg-white p-3">
                         <div className="mb-2 text-xs font-medium text-slate-700">미리보기</div>
-                        <div className="markdown max-w-none text-sm">
+                        <div className="markdown max-w-none text-sm whitespace-pre-wrap">
                           <ReactMarkdown remarkPlugins={[remarkGfm]}>
                             {selectedTodo.content || "_(내용 없음)_"}
                           </ReactMarkdown>
@@ -1422,7 +1447,6 @@ export default function App() {
                     ) : null}
                   </div>
 
-
                   <div className="rounded-2xl border border-slate-200 bg-white p-3">
                     <div className="mb-2 text-xs font-medium text-slate-700">관계</div>
                     <div className="text-xs text-slate-500">같은 날짜의 의존/차단 관계를 기록합니다.</div>
@@ -1432,7 +1456,7 @@ export default function App() {
                         <div className="text-xs text-slate-500">아직 관계가 없습니다.</div>
                       ) : (
                         selectedTodo?.rels.map((r, idx) => {
-                          const target = todos.find((t) => t.id === r.toId);
+                          const target = summaryTodos.find((t) => t.id === r.toId);
                           return (
                             <div
                               key={`${r.toId}_${idx}`}
@@ -1518,6 +1542,13 @@ export default function App() {
                       닫기
                     </button>
                     <button
+                      className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700 hover:bg-emerald-100"
+                      onClick={() => selectedTodo && patchTodo(selectedTodo.id, { title: selectedTodo.title, content: selectedTodo.content, date: selectedTodo.date, status: selectedTodo.status, refs: selectedTodo.refs, rels: selectedTodo.rels, attachments: selectedTodo.attachments, updatedAt: nowIso() })}
+                    >
+                      <Save size={14} />
+                      저장
+                    </button>
+                    <button
                       className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 hover:bg-rose-100"
                       onClick={() => selectedTodo && deleteTodo(selectedTodo.id)}
                     >
@@ -1527,7 +1558,6 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              )
             </div>
           </div>
         </div>

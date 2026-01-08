@@ -12,33 +12,31 @@
     "preview": "vite preview",
     "lint": "eslint ."
   },
-   "build": {
+  "build": {
     "appId": "com.todo.desktop",
     "productName": "Todo",
     "asar": true,
-
     "directories": {
       "output": "release"
     },
-
     "files": [
       "src/**",
       "dist/**",
       "src/preload/**",
-      "build-electron/**",      
+      "build-electron/**",
       "package.json"
     ],
-
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico"
     },
-
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
@@ -60,6 +58,7 @@
     "react-dom": "^19.2.3",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "sqlite3": "^5.1.7",
     "zustand": "^5.0.9"
   },
   "devDependencies": {
