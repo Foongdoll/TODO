@@ -900,7 +900,7 @@ export default function App() {
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-b from-amber-50 via-white to-slate-50 text-slate-900">
+    <div className="relative flex h-screen flex-col overflow-hidden bg-gradient-to-b from-amber-50 via-white to-slate-50 text-slate-900">
       <div className="pointer-events-none absolute inset-0 -z-10">
         <div className="absolute -left-24 top-10 h-64 w-64 rounded-full bg-rose-200/40 blur-3xl" />
         <div className="absolute right-0 top-32 h-72 w-72 rounded-full bg-amber-200/50 blur-3xl" />
@@ -909,6 +909,7 @@ export default function App() {
 
       <TitleBar />
 
+      <div className="flex-1 min-h-0 overflow-y-auto">
       <div className="sticky top-0 z-10 border-b border-slate-200/70 bg-white/70 backdrop-blur">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="flex items-center gap-3">
@@ -1561,6 +1562,7 @@ export default function App() {
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

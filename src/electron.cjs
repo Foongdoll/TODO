@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeTheme, shell, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs-extra");
 
@@ -102,6 +102,54 @@ async function initTodoStore() {
 
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_date_ord ON todos(date, ord);`);
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status);`);
+
+    await run(`
+    CREATE TABLE IF NOT EXISTS note_folders (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      parentId TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+  `);
+
+    await run(`
+    CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL DEFAULT '',
+      folderId TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+  `);
+
+    await run(`
+    CREATE TABLE IF NOT EXISTS note_attachments (
+      id TEXT PRIMARY KEY,
+      noteId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      path TEXT NOT NULL,
+      mime TEXT NOT NULL,
+      size INTEGER NOT NULL DEFAULT 0,
+      kind TEXT NOT NULL DEFAULT 'file',
+      createdAt TEXT NOT NULL
+    );
+  `);
+
+    await run(`
+    CREATE TABLE IF NOT EXISTS note_todo_links (
+      noteId TEXT NOT NULL,
+      todoId TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      PRIMARY KEY (noteId, todoId)
+    );
+  `);
+
+    await run(`CREATE INDEX IF NOT EXISTS idx_note_folders_parent ON note_folders(parentId);`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folderId);`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_note_attachments_note ON note_attachments(noteId);`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_note_links_todo ON note_todo_links(todoId);`);
 
     // meta defaults
     const v = await get(`SELECT value FROM meta WHERE key='version'`);
@@ -276,6 +324,341 @@ async function updateTodoOrders(updates) {
   }
 }
 
+async function loadNoteTree() {
+  await initTodoStore();
+  const folders = await all(
+    `
+    SELECT id, name, parentId, createdAt, updatedAt
+    FROM note_folders
+    ORDER BY name ASC
+    `
+  );
+  const notes = await all(
+    `
+    SELECT id, title, folderId, createdAt, updatedAt
+    FROM notes
+    ORDER BY updatedAt DESC
+    `
+  );
+  return { folders, notes };
+}
+
+async function loadNoteDetail(noteId) {
+  await initTodoStore();
+  if (!noteId) return null;
+  const note = await get(
+    `
+    SELECT id, title, content, folderId, createdAt, updatedAt
+    FROM notes
+    WHERE id = ?
+    `,
+    [noteId]
+  );
+  if (!note) return null;
+  const attachments = await all(
+    `
+    SELECT id, noteId, name, path, mime, size, kind, createdAt
+    FROM note_attachments
+    WHERE noteId = ?
+    ORDER BY createdAt ASC
+    `,
+    [noteId]
+  );
+  const links = await all(
+    `
+    SELECT todoId
+    FROM note_todo_links
+    WHERE noteId = ?
+    ORDER BY createdAt ASC
+    `,
+    [noteId]
+  );
+  return {
+    ...note,
+    attachments,
+    todoLinks: links.map((row) => row.todoId),
+  };
+}
+
+async function upsertNote(note) {
+  await initTodoStore();
+  if (!note || !note.id) return false;
+  const createdAt = String(note.createdAt ?? new Date().toISOString());
+  const updatedAt = String(note.updatedAt ?? new Date().toISOString());
+  await run(
+    `
+    INSERT INTO notes (id, title, content, folderId, createdAt, updatedAt)
+    VALUES (?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET
+      title=excluded.title,
+      content=excluded.content,
+      folderId=excluded.folderId,
+      updatedAt=excluded.updatedAt
+    `,
+    [
+      String(note.id),
+      String(note.title ?? ""),
+      String(note.content ?? ""),
+      note.folderId ? String(note.folderId) : null,
+      createdAt,
+      updatedAt,
+    ]
+  );
+  await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
+  return true;
+}
+
+async function upsertNoteFolder(folder) {
+  await initTodoStore();
+  if (!folder || !folder.id) return false;
+  const createdAt = String(folder.createdAt ?? new Date().toISOString());
+  const updatedAt = String(folder.updatedAt ?? new Date().toISOString());
+  await run(
+    `
+    INSERT INTO note_folders (id, name, parentId, createdAt, updatedAt)
+    VALUES (?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET
+      name=excluded.name,
+      parentId=excluded.parentId,
+      updatedAt=excluded.updatedAt
+    `,
+    [
+      String(folder.id),
+      String(folder.name ?? ""),
+      folder.parentId ? String(folder.parentId) : null,
+      createdAt,
+      updatedAt,
+    ]
+  );
+  await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
+  return true;
+}
+
+async function deleteNote(noteId) {
+  await initTodoStore();
+  if (!noteId) return false;
+  const attRows = await all(`SELECT path FROM note_attachments WHERE noteId = ?`, [noteId]);
+  await run("BEGIN IMMEDIATE TRANSACTION;");
+  try {
+    await run(`DELETE FROM note_todo_links WHERE noteId = ?`, [noteId]);
+    await run(`DELETE FROM note_attachments WHERE noteId = ?`, [noteId]);
+    await run(`DELETE FROM notes WHERE id = ?`, [noteId]);
+    await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
+    await run("COMMIT;");
+  } catch (e) {
+    await run("ROLLBACK;");
+    throw e;
+  }
+  for (const row of attRows) {
+    if (!row?.path) continue;
+    try {
+      await fs.remove(row.path);
+    } catch {
+      // ignore file delete errors
+    }
+  }
+  return true;
+}
+
+async function deleteNoteFolder(folderId) {
+  await initTodoStore();
+  if (!folderId) return false;
+  const folderRows = await all(`SELECT id, parentId FROM note_folders`);
+  const childrenMap = new Map();
+  for (const row of folderRows) {
+    const key = row.parentId ?? "__root__";
+    if (!childrenMap.has(key)) childrenMap.set(key, []);
+    childrenMap.get(key).push(row.id);
+  }
+  const collected = [];
+  const stack = [folderId];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || collected.includes(current)) continue;
+    collected.push(current);
+    const kids = childrenMap.get(current) ?? [];
+    for (const kid of kids) stack.push(kid);
+  }
+  if (collected.length === 0) return false;
+  const placeholders = collected.map(() => "?").join(",");
+  const noteRows = await all(
+    `SELECT id FROM notes WHERE folderId IN (${placeholders})`,
+    collected
+  );
+  const noteIds = noteRows.map((r) => r.id);
+  const attPaths = [];
+  if (noteIds.length) {
+    const notePlaceholders = noteIds.map(() => "?").join(",");
+    const attRows = await all(
+      `SELECT path FROM note_attachments WHERE noteId IN (${notePlaceholders})`,
+      noteIds
+    );
+    for (const row of attRows) {
+      if (row?.path) attPaths.push(row.path);
+    }
+  }
+  await run("BEGIN IMMEDIATE TRANSACTION;");
+  try {
+    if (noteIds.length) {
+      const notePlaceholders = noteIds.map(() => "?").join(",");
+      await run(`DELETE FROM note_todo_links WHERE noteId IN (${notePlaceholders})`, noteIds);
+      await run(`DELETE FROM note_attachments WHERE noteId IN (${notePlaceholders})`, noteIds);
+      await run(`DELETE FROM notes WHERE id IN (${notePlaceholders})`, noteIds);
+    }
+    await run(`DELETE FROM note_folders WHERE id IN (${placeholders})`, collected);
+    await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
+    await run("COMMIT;");
+  } catch (e) {
+    await run("ROLLBACK;");
+    throw e;
+  }
+  for (const filePath of attPaths) {
+    try {
+      await fs.remove(filePath);
+    } catch {
+      // ignore file delete errors
+    }
+  }
+  return true;
+}
+
+async function addNoteAttachment(noteId, payload) {
+  await initTodoStore();
+  if (!noteId || !payload?.name || !payload?.dataUrl) return null;
+  const saved = await saveFromDataUrl(payload.name, payload.dataUrl);
+  const isImage = saved.mime?.startsWith("image/");
+  const attachment = {
+    id: `att_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    noteId: String(noteId),
+    name: String(payload.name),
+    path: saved.path,
+    mime: saved.mime || "application/octet-stream",
+    size: saved.size || 0,
+    kind: isImage ? "image" : "file",
+    createdAt: new Date().toISOString(),
+  };
+  await run(
+    `
+    INSERT INTO note_attachments (id, noteId, name, path, mime, size, kind, createdAt)
+    VALUES (?,?,?,?,?,?,?,?)
+    `,
+    [
+      attachment.id,
+      attachment.noteId,
+      attachment.name,
+      attachment.path,
+      attachment.mime,
+      attachment.size,
+      attachment.kind,
+      attachment.createdAt,
+    ]
+  );
+  await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
+  return attachment;
+}
+
+async function removeNoteAttachment(noteId, attachmentId) {
+  await initTodoStore();
+  if (!noteId || !attachmentId) return false;
+  const row = await get(
+    `SELECT path FROM note_attachments WHERE id = ? AND noteId = ?`,
+    [attachmentId, noteId]
+  );
+  await run(`DELETE FROM note_attachments WHERE id = ? AND noteId = ?`, [attachmentId, noteId]);
+  await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
+  if (row?.path) {
+    try {
+      await fs.remove(row.path);
+    } catch {
+      // ignore file delete errors
+    }
+  }
+  return true;
+}
+
+async function setNoteTodoLinks(noteId, todoIds) {
+  await initTodoStore();
+  if (!noteId) return false;
+  const normalized = Array.isArray(todoIds)
+    ? Array.from(new Set(todoIds.filter(Boolean).map((v) => String(v))))
+    : [];
+  await run("BEGIN IMMEDIATE TRANSACTION;");
+  try {
+    await run(`DELETE FROM note_todo_links WHERE noteId = ?`, [noteId]);
+    const now = new Date().toISOString();
+    for (const todoId of normalized) {
+      await run(
+        `INSERT INTO note_todo_links (noteId, todoId, createdAt) VALUES (?,?,?)`,
+        [String(noteId), todoId, now]
+      );
+    }
+    await run(`INSERT OR REPLACE INTO meta(key,value) VALUES('updatedAt', ?)`, [now]);
+    await run("COMMIT;");
+    return true;
+  } catch (e) {
+    await run("ROLLBACK;");
+    throw e;
+  }
+}
+
+async function downloadAttachment(payload) {
+  if (!payload?.path) return { ok: false, canceled: false };
+  const safeName = sanitizeFileName(payload.name || path.basename(payload.path));
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: "첨부파일 저장",
+    defaultPath: path.join(app.getPath("downloads"), safeName),
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  await fs.copy(payload.path, filePath);
+  return { ok: true, path: filePath };
+}
+
+async function exportNotePdf(payload) {
+  if (!payload?.html) return { ok: false, canceled: false };
+  const safeName = sanitizeFileName(payload.title || "note");
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: "노트를 PDF로 내보내기",
+    defaultPath: path.join(app.getPath("documents"), `${safeName}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+
+  const html = `
+    <!doctype html>
+    <html lang="ko">
+      <head>
+        <meta charset="utf-8" />
+        <title>${safeName}</title>
+        <style>
+          body { font-family: "Segoe UI", Arial, sans-serif; color: #0f172a; padding: 32px; }
+          h1, h2, h3 { font-family: "Georgia", serif; }
+          img { max-width: 100%; height: auto; }
+          pre { background: #0f172a; color: #f8fafc; padding: 12px; border-radius: 12px; overflow: auto; }
+          code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; }
+          blockquote { border-left: 3px solid #f59e0b; padding-left: 12px; color: #475569; }
+        </style>
+      </head>
+      <body>
+        <h1>${safeName}</h1>
+        <div>${payload.html}</div>
+      </body>
+    </html>
+  `;
+
+  const pdfWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      sandbox: true,
+    },
+  });
+
+  await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  const pdfData = await pdfWindow.webContents.printToPDF({ printBackground: true });
+  await fs.outputFile(filePath, pdfData);
+  pdfWindow.close();
+  return { ok: true, path: filePath };
+}
+
 function sanitizeFileName(name) {
   return name.replace(/[<>:"/\\|?*]+/g, "_").replace(/\s+/g, " ").trim() || "file";
 }
@@ -405,6 +788,56 @@ ipcMain.handle("todos:delete", async (_evt, id) => {
 
 ipcMain.handle("todos:updateOrders", async (_evt, updates) => {
   return await updateTodoOrders(updates);
+});
+
+/** -------------------------
+ *  IPC: NOTES
+ *  ------------------------- */
+ipcMain.handle("notes:tree", async () => {
+  return await loadNoteTree();
+});
+
+ipcMain.handle("notes:get", async (_evt, noteId) => {
+  return await loadNoteDetail(String(noteId));
+});
+
+ipcMain.handle("notes:upsertNote", async (_evt, note) => {
+  return await upsertNote(note);
+});
+
+ipcMain.handle("notes:upsertFolder", async (_evt, folder) => {
+  return await upsertNoteFolder(folder);
+});
+
+ipcMain.handle("notes:deleteNote", async (_evt, noteId) => {
+  return await deleteNote(String(noteId));
+});
+
+ipcMain.handle("notes:deleteFolder", async (_evt, folderId) => {
+  return await deleteNoteFolder(String(folderId));
+});
+
+ipcMain.handle("notes:addAttachment", async (_evt, payload) => {
+  if (!payload?.noteId) return null;
+  return await addNoteAttachment(String(payload.noteId), payload);
+});
+
+ipcMain.handle("notes:removeAttachment", async (_evt, payload) => {
+  if (!payload?.noteId || !payload?.attachmentId) return false;
+  return await removeNoteAttachment(String(payload.noteId), String(payload.attachmentId));
+});
+
+ipcMain.handle("notes:updateLinks", async (_evt, payload) => {
+  if (!payload?.noteId) return false;
+  return await setNoteTodoLinks(String(payload.noteId), payload.todoIds ?? []);
+});
+
+ipcMain.handle("notes:downloadAttachment", async (_evt, payload) => {
+  return await downloadAttachment(payload);
+});
+
+ipcMain.handle("notes:exportPdf", async (_evt, payload) => {
+  return await exportNotePdf(payload);
 });
 
 /** -------------------------
