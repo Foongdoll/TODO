@@ -61,6 +61,14 @@ function toJsonArray(value) {
   return JSON.stringify(Array.isArray(value) ? value : []);
 }
 
+async function ensureColumn(table, column, declaration) {
+  const rows = await all(`PRAGMA table_info(${table})`);
+  const exists = rows.some((row) => row?.name === column);
+  if (!exists) {
+    await run(`ALTER TABLE ${table} ADD COLUMN ${declaration}`);
+  }
+}
+
 async function initTodoStore() {
   if (db) return;
   if (dbInitPromise) {
@@ -90,11 +98,13 @@ async function initTodoStore() {
       title TEXT NOT NULL DEFAULT '',
       content TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'TODO',
+      isDaily INTEGER NOT NULL DEFAULT 0,
       date TEXT NOT NULL,
       ord INTEGER NOT NULL DEFAULT 0,
       refs TEXT NOT NULL DEFAULT '[]',
       rels TEXT NOT NULL DEFAULT '[]',
       attachments TEXT NOT NULL DEFAULT '[]',
+      linkedNoteId TEXT,
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
     );
@@ -102,6 +112,8 @@ async function initTodoStore() {
 
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_date_ord ON todos(date, ord);`);
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status);`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_todos_linked_note ON todos(linkedNoteId);`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_todos_daily ON todos(isDaily);`);
 
     await run(`
     CREATE TABLE IF NOT EXISTS note_folders (
@@ -118,6 +130,7 @@ async function initTodoStore() {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL DEFAULT '',
       content TEXT NOT NULL DEFAULT '',
+      contentTiptap TEXT,
       folderId TEXT,
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
@@ -151,6 +164,10 @@ async function initTodoStore() {
     await run(`CREATE INDEX IF NOT EXISTS idx_note_attachments_note ON note_attachments(noteId);`);
     await run(`CREATE INDEX IF NOT EXISTS idx_note_links_todo ON note_todo_links(todoId);`);
 
+    await ensureColumn("todos", "linkedNoteId", "linkedNoteId TEXT");
+    await ensureColumn("todos", "isDaily", "isDaily INTEGER NOT NULL DEFAULT 0");
+    await ensureColumn("notes", "contentTiptap", "contentTiptap TEXT");
+
     // meta defaults
     const v = await get(`SELECT value FROM meta WHERE key='version'`);
     if (!v) {
@@ -173,13 +190,13 @@ async function loadTodosByDate(selectedDate) {
   const rows = await all(
     `
     SELECT
-      id, title, content, status, date,
+      id, title, content, status, isDaily, date,
       ord AS "order",
-      refs, rels, attachments,
+      refs, rels, attachments, linkedNoteId,
       createdAt, updatedAt
     FROM todos
-    WHERE date = ?
-    ORDER BY ord ASC, updatedAt ASC
+    WHERE date = ? OR isDaily = 1
+    ORDER BY isDaily DESC, ord ASC, updatedAt ASC
     `,
     [selectedDate]
   );
@@ -189,11 +206,13 @@ async function loadTodosByDate(selectedDate) {
     title: r.title,
     content: r.content,
     status: r.status,
+    isDaily: Boolean(r.isDaily),
     date: r.date,
     order: r.order,
     refs: safeJsonParseArray(r.refs),
     rels: safeJsonParseArray(r.rels),
     attachments: safeJsonParseArray(r.attachments),
+    linkedNoteId: r.linkedNoteId ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));
@@ -205,8 +224,9 @@ async function loadTodoSummaryIndex() {
 
   const rows = await all(`
     SELECT
-      id, title, status, date,
+      id, title, status, isDaily, date,
       ord AS "order",
+      linkedNoteId,
       createdAt, updatedAt
     FROM todos
     ORDER BY date ASC, ord ASC, updatedAt ASC
@@ -216,8 +236,10 @@ async function loadTodoSummaryIndex() {
     id: r.id,
     title: r.title,
     status: r.status,
+    isDaily: Boolean(r.isDaily),
     date: r.date,
     order: r.order,
+    linkedNoteId: r.linkedNoteId ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));
@@ -233,17 +255,19 @@ async function upsertTodoRow(todo) {
   await run(
     `
     INSERT INTO todos
-    (id, title, content, status, date, ord, refs, rels, attachments, createdAt, updatedAt)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    (id, title, content, status, isDaily, date, ord, refs, rels, attachments, linkedNoteId, createdAt, updatedAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       title=excluded.title,
       content=excluded.content,
       status=excluded.status,
+      isDaily=excluded.isDaily,
       date=excluded.date,
       ord=excluded.ord,
       refs=excluded.refs,
       rels=excluded.rels,
       attachments=excluded.attachments,
+      linkedNoteId=excluded.linkedNoteId,
       updatedAt=excluded.updatedAt
     `,
     [
@@ -251,11 +275,13 @@ async function upsertTodoRow(todo) {
       String(todo.title ?? ""),
       String(todo.content ?? ""),
       String(todo.status ?? "TODO"),
+      todo.isDaily ? 1 : 0,
       String(todo.date ?? ""),
       Number.isFinite(todo.order) ? todo.order : 0,
       toJsonArray(todo.refs),
       toJsonArray(todo.rels),
       toJsonArray(todo.attachments),
+      todo.linkedNoteId ? String(todo.linkedNoteId) : null,
       createdAt,
       updatedAt,
     ]
@@ -348,7 +374,7 @@ async function loadNoteDetail(noteId) {
   if (!noteId) return null;
   const note = await get(
     `
-    SELECT id, title, content, folderId, createdAt, updatedAt
+    SELECT id, title, content, contentTiptap, folderId, createdAt, updatedAt
     FROM notes
     WHERE id = ?
     `,
@@ -385,13 +411,20 @@ async function upsertNote(note) {
   if (!note || !note.id) return false;
   const createdAt = String(note.createdAt ?? new Date().toISOString());
   const updatedAt = String(note.updatedAt ?? new Date().toISOString());
+  const contentTiptap =
+    typeof note.contentTiptap === "string"
+      ? note.contentTiptap
+      : note.contentTiptap
+        ? JSON.stringify(note.contentTiptap)
+        : null;
   await run(
     `
-    INSERT INTO notes (id, title, content, folderId, createdAt, updatedAt)
-    VALUES (?,?,?,?,?,?)
+    INSERT INTO notes (id, title, content, contentTiptap, folderId, createdAt, updatedAt)
+    VALUES (?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       title=excluded.title,
       content=excluded.content,
+      contentTiptap=excluded.contentTiptap,
       folderId=excluded.folderId,
       updatedAt=excluded.updatedAt
     `,
@@ -399,6 +432,7 @@ async function upsertNote(note) {
       String(note.id),
       String(note.title ?? ""),
       String(note.content ?? ""),
+      contentTiptap,
       note.folderId ? String(note.folderId) : null,
       createdAt,
       updatedAt,
@@ -749,6 +783,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  initTodoStore();
   createWindow();
 
   app.on("activate", () => {
@@ -890,4 +925,16 @@ ipcMain.handle("window:isMaximized", () => {
 
 ipcMain.handle("window:theme", () => {
   return nativeTheme.shouldUseDarkColors ? "dark" : "light";
+});
+
+ipcMain.handle("window:getOpacity", () => {
+  if (!win) return 1;
+  return typeof win.getOpacity === "function" ? win.getOpacity() : 1;
+});
+
+ipcMain.handle("window:setOpacity", (_evt, value) => {
+  if (!win || typeof win.setOpacity !== "function") return 1;
+  const next = Math.min(1, Math.max(0.6, Number(value) || 1));
+  win.setOpacity(next);
+  return next;
 });

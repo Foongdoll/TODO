@@ -35,6 +35,8 @@ const api = {
     close: () => ipcRenderer.invoke("window:close"),
     isMaximized: () => ipcRenderer.invoke("window:isMaximized"),
     theme: () => ipcRenderer.invoke("window:theme"),
+    getOpacity: () => ipcRenderer.invoke("window:getOpacity"),
+    setOpacity: (value) => ipcRenderer.invoke("window:setOpacity", value),
     onMaximizedChanged: (cb) => {
       const handler = (_event, isMax) => cb(isMax);
       ipcRenderer.on("window:maximized-changed", handler);

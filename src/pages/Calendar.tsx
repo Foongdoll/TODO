@@ -5,8 +5,10 @@ export type TodoSummary = {
   id: string;
   title: string;
   status: TodoStatus;
+  isDaily?: boolean;
   date: string;
   order: number;
+  linkedNoteId?: string | null;
   createdAt: string;
   updatedAt: string;
 };

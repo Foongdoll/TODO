@@ -1,6 +1,26 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type JSONContent, Node, mergeAttributes } from "@tiptap/core";
+import {
+  EditorContent,
+  NodeViewWrapper,
+  ReactNodeViewRenderer,
+  useEditor,
+  type NodeViewProps,
+} from "@tiptap/react";
+import { FloatingMenu } from "@tiptap/react/menus";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import StarterKit from "@tiptap/starter-kit";
+import Image from "@tiptap/extension-image";
+import Link from "@tiptap/extension-link";
+import Placeholder from "@tiptap/extension-placeholder";
+import TextAlign from "@tiptap/extension-text-align";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
+import { Table } from "@tiptap/extension-table";
+import TableRow from "@tiptap/extension-table-row";
+import TableCell from "@tiptap/extension-table-cell";
+import TableHeader from "@tiptap/extension-table-header";
 import {
   ChevronDown,
   ChevronRight,
@@ -10,9 +30,11 @@ import {
   Folder,
   FolderPlus,
   Link2,
+  Pencil,
   Save,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 
 type NoteFolder = {
@@ -44,6 +66,7 @@ type NoteAttachment = {
 
 type NoteDetail = NoteSummary & {
   content: string;
+  contentTiptap?: JSONContent | null;
   attachments: NoteAttachment[];
   todoLinks: string[];
 };
@@ -67,6 +90,7 @@ const hasFileBridge = typeof window !== "undefined" && Boolean(window.api?.files
 const uid = () =>
   globalThis.crypto?.randomUUID?.() ?? `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
 const nowIso = () => new Date().toISOString();
+const formatDateTime = (iso: string) => (iso ? iso.replace("T", " ").slice(0, 16) : "");
 const DRAG_MIME = "application/x-note-item";
 const ROOT_DROP_ID = "__root__";
 
@@ -109,7 +133,262 @@ async function fileToDataUrl(file: File) {
   });
 }
 
-export default function Note() {
+type ChartDatum = { label: string; value: number };
+
+const EMPTY_DOC: JSONContent = {
+  type: "doc",
+  content: [{ type: "paragraph" }],
+};
+
+const DEFAULT_SELECT_OPTIONS = ["진행중", "완료", "보류"];
+
+const normalizeSelectOptions = (value: unknown) =>
+  Array.isArray(value) ? value.map((item) => String(item)) : DEFAULT_SELECT_OPTIONS;
+
+const normalizeChartData = (value: unknown): ChartDatum[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      label: String(item?.label ?? ""),
+      value: Number.isFinite(item?.value) ? Number(item.value) : 0,
+    }))
+    .filter((item) => item.label);
+};
+
+const toDocFromText = (text: string): JSONContent => {
+  if (!text) return EMPTY_DOC;
+  const lines = text.split(/\r?\n/);
+  const content = lines.map((line) =>
+    line
+      ? { type: "paragraph", content: [{ type: "text", text: line }] }
+      : { type: "paragraph" }
+  );
+  return { type: "doc", content };
+};
+
+const parseContentTiptap = (raw: unknown): JSONContent | null => {
+  if (!raw) return null;
+  if (typeof raw === "object") return raw as JSONContent;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") return parsed as JSONContent;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const isPlainDoc = (doc?: JSONContent | null) => {
+  if (!doc || doc.type !== "doc") return true;
+  if (!Array.isArray(doc.content)) return true;
+  return doc.content.every((block) => {
+    if (block.type !== "paragraph") return false;
+    if (!block.content) return true;
+    return block.content.every((inline) => {
+      if (inline.type === "hardBreak") return true;
+      if (inline.type !== "text") return false;
+      return !(inline.marks && inline.marks.length > 0);
+    });
+  });
+};
+
+const MARKDOWN_PATTERN =
+  /(^\s{0,3}#{1,6}\s)|(\*\*[^*]+\*\*)|(__[^_]+__)|(`{1,3}[^`]+`{1,3})|(^\s*[-*+]\s+)|(^\s*\d+\.\s+)|(\[[^\]]+\]\([^)]+\))|(\|.+\|)/m;
+
+const hasMarkdownSyntax = (value: string) => MARKDOWN_PATTERN.test(value);
+
+function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const label = String(node.attrs.label ?? "상태");
+  const options = normalizeSelectOptions(node.attrs.options);
+  const value = String(node.attrs.value ?? options[0] ?? "");
+
+  return (
+    <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+      <select
+        value={value}
+        disabled={!editor.isEditable}
+        onChange={(event) => updateAttributes({ value: event.target.value })}
+        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+      >
+        {options.map((opt) => (
+          <option key={opt} value={opt}>
+            {opt}
+          </option>
+        ))}
+      </select>
+    </NodeViewWrapper>
+  );
+}
+
+const SelectBlock = Node.create({
+  name: "selectBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      label: { default: "상태" },
+      value: { default: "진행중" },
+      options: { default: DEFAULT_SELECT_OPTIONS },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-select-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-select-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(SelectBlockView);
+  },
+});
+
+function ChartBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [title, setTitle] = useState(String(node.attrs.title ?? "차트"));
+  const [draftData, setDraftData] = useState(
+    JSON.stringify(normalizeChartData(node.attrs.data), null, 2)
+  );
+  const [error, setError] = useState("");
+  const data = normalizeChartData(node.attrs.data);
+  const max = Math.max(...data.map((item) => item.value), 1);
+
+  useEffect(() => {
+    setTitle(String(node.attrs.title ?? "차트"));
+    setDraftData(JSON.stringify(normalizeChartData(node.attrs.data), null, 2));
+    setError("");
+  }, [node.attrs.title, node.attrs.data]);
+
+  const handleApply = () => {
+    try {
+      const parsed = JSON.parse(draftData);
+      const normalized = normalizeChartData(parsed);
+      updateAttributes({
+        title: title.trim() || "차트",
+        data: normalized,
+      });
+      setIsEditing(false);
+      setError("");
+    } catch {
+      setError("JSON 형식이 올바르지 않습니다.");
+    }
+  };
+
+  return (
+    <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Chart</div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="차트 제목"
+          />
+          <textarea
+            value={draftData}
+            onChange={(event) => setDraftData(event.target.value)}
+            className="h-32 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+            placeholder='[{ "label": "A", "value": 10 }]'
+          />
+          {error ? <div className="text-xs text-rose-600">{error}</div> : null}
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={handleApply}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftData(JSON.stringify(normalizeChartData(node.attrs.data), null, 2));
+                setError("");
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <div className="text-sm font-semibold text-slate-800">{title}</div>
+          {data.length === 0 ? (
+            <div className="text-xs text-slate-400">표시할 데이터가 없습니다.</div>
+          ) : (
+            data.map((item) => (
+              <div key={item.label} className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                  <span>{item.label}</span>
+                  <span>{item.value}</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-slate-100">
+                  <div
+                    className="h-2 rounded-full bg-amber-300"
+                    style={{ width: `${Math.max(6, (item.value / max) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const ChartBlock = Node.create({
+  name: "chartBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      title: { default: "차트" },
+      data: {
+        default: [
+          { label: "A", value: 30 },
+          { label: "B", value: 55 },
+          { label: "C", value: 20 },
+        ],
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-chart-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-chart-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(ChartBlockView);
+  },
+});
+
+export default function Note({
+  focusNoteId,
+  onFocusHandled,
+  onOpenTodo,
+}: {
+  focusNoteId?: string | null;
+  onFocusHandled?: () => void;
+  onOpenTodo?: (todoId: string) => void;
+}) {
   const [folders, setFolders] = useState<NoteFolder[]>([]);
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -123,12 +402,15 @@ export default function Note() {
   const [statusMessage, setStatusMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
 
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
-  const previewRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const saveTimerRef = useRef<number | null>(null);
-  const pendingSaveRef = useRef<NoteDetail | null>(null);
+  const selectedNoteRef = useRef<NoteDetail | null>(null);
+  const isEditingRef = useRef(false);
+  const isFolderComposingRef = useRef(false);
+  const isTitleComposingRef = useRef(false);
 
   const foldersByParent = useMemo(() => {
     const map = new Map<string | null, NoteFolder[]>();
@@ -168,6 +450,110 @@ export default function Note() {
     setStatusMessage(message);
     window.setTimeout(() => setStatusMessage(""), 2600);
   };
+
+  const editorExtensions = useMemo(
+    () => [
+      StarterKit.configure({
+        heading: { levels: [1, 2, 3] },
+      }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      Table.configure({ resizable: true }),
+      TableRow,
+      TableHeader,
+      TableCell,
+      Image.configure({ inline: false, allowBase64: true }),
+      Link.configure({ openOnClick: false, autolink: true, linkOnPaste: true }),
+      Placeholder.configure({ placeholder: "노트 내용을 입력하세요..." }),
+      TextAlign.configure({ types: ["heading", "paragraph"] }),
+      SelectBlock,
+      ChartBlock,
+    ],
+    []
+  );
+
+  const editor = useEditor({
+    extensions: editorExtensions,
+    content: EMPTY_DOC,
+    editable: isEditing,
+  });
+
+  const handleEditorImageFiles = useCallback(async (files: File[]) => {
+    if (!editor || !isEditingRef.current) return false;
+    const note = selectedNoteRef.current;
+    if (!note || !hasNotesBridge) return false;
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (images.length === 0) return false;
+    for (const file of images) {
+      const dataUrl = await fileToDataUrl(file);
+      const attachment = await window.api.notes.addAttachment({
+        noteId: note.id,
+        name: file.name,
+        dataUrl,
+      });
+      if (!attachment) continue;
+      setSelectedNote((prev) => {
+        if (!prev) return prev;
+        return { ...prev, attachments: [...prev.attachments, attachment] };
+      });
+      if (attachment.kind === "image") {
+        editor.chain().focus().setImage({ src: toFileUrl(attachment.path), alt: attachment.name }).run();
+      }
+    }
+    return true;
+  }, [editor]);
+
+  useEffect(() => {
+    selectedNoteRef.current = selectedNote;
+  }, [selectedNote]);
+
+  useEffect(() => {
+    isEditingRef.current = isEditing;
+    if (editor) editor.setEditable(isEditing);
+  }, [isEditing, editor]);
+
+  useEffect(() => {
+    if (!editor) return;
+    editor.setOptions({
+      editorProps: {
+        attributes: { class: "tiptap" },
+        handleDrop: (_view, event) => {
+          if (!isEditingRef.current) return false;
+          const files = Array.from(event.dataTransfer?.files ?? []);
+          if (files.length === 0) return false;
+          const hasImages = files.some((file) => file.type.startsWith("image/"));
+          if (!hasImages) return false;
+          void handleEditorImageFiles(files);
+          return true;
+        },
+        handlePaste: (_view, event) => {
+          if (!isEditingRef.current) return false;
+          const files = Array.from(event.clipboardData?.files ?? []);
+          if (files.length === 0) return false;
+          const hasImages = files.some((file) => file.type.startsWith("image/"));
+          if (!hasImages) return false;
+          void handleEditorImageFiles(files);
+          return true;
+        },
+      },
+    });
+  }, [editor, handleEditorImageFiles]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const nextContent =
+      selectedNote?.contentTiptap
+        ? parseContentTiptap(selectedNote.contentTiptap) ?? EMPTY_DOC
+        : toDocFromText(selectedNote?.content ?? "");
+    editor.commands.setContent(nextContent, {emitUpdate: false});    
+  }, [editor, selectedNote?.id]);
+
+  useEffect(() => {
+    if (!selectedNote) return;
+    setDraftTitle(selectedNote.title ?? "");
+    setDraftFolderId(selectedNote.folderId ?? null);
+    setIsEditing(false);
+  }, [selectedNote?.id]);
 
   const parseDragItem = (event: React.DragEvent): DragItem | null => {
     const raw = event.dataTransfer.getData(DRAG_MIME) || event.dataTransfer.getData("text/plain");
@@ -293,7 +679,12 @@ export default function Note() {
       return;
     }
     window.api.notes.get(selectedNoteId).then((detail) => {
-      setSelectedNote(detail);
+      if (!detail) {
+        setSelectedNote(null);
+        return;
+      }
+      const parsed = parseContentTiptap(detail.contentTiptap);
+      setSelectedNote({ ...detail, contentTiptap: parsed ?? detail.contentTiptap ?? null });
     });
   }, [selectedNoteId]);
 
@@ -305,12 +696,17 @@ export default function Note() {
   }, [notes, selectedNoteId]);
 
   useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
+    if (!focusNoteId) return;
+    setSelectedNoteId(focusNoteId);
+    const match = notes.find((note) => note.id === focusNoteId);
+    if (match) {
+      setSelectedFolderId(match.folderId ?? null);
+      if (match.folderId) {
+        setExpandedFolders((prev) => ({ ...prev, [match.folderId ?? ROOT_DROP_ID]: true }));
       }
-    };
-  }, []);
+    }
+    onFocusHandled?.();
+  }, [focusNoteId, notes, onFocusHandled]);
 
   useEffect(() => {
     const handleDragEnd = () => setDragOverId(null);
@@ -341,41 +737,78 @@ export default function Note() {
     setNotes(result?.notes ?? []);
   };
 
-  const scheduleSave = (note: NoteDetail) => {
-    if (!hasNotesBridge) return;
-    pendingSaveRef.current = note;
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(async () => {
-      if (!pendingSaveRef.current) return;
-      await window.api.notes.upsertNote(pendingSaveRef.current);
-      await refreshTree();
-    }, 600);
+  const bumpNoteUpdatedAt = async (note?: NoteDetail) => {
+    const current = note ?? selectedNoteRef.current;
+    if (!current || !hasNotesBridge) return;
+    const updated = { ...current, updatedAt: nowIso() };
+    await window.api.notes.upsertNote(updated);
+    setSelectedNote(updated);
+    await refreshTree();
   };
 
-  const touchNote = () => {
-    setSelectedNote((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, updatedAt: nowIso() };
-      scheduleSave(next);
-      setNotes((list) =>
-        list.map((note) => (note.id === next.id ? { ...note, updatedAt: next.updatedAt } : note))
-      );
-      return next;
-    });
+  const handleStartEdit = () => {
+    if (!selectedNote) return;
+    setDraftTitle(selectedNote.title ?? "");
+    setDraftFolderId(selectedNote.folderId ?? null);
+    setIsEditing(true);
+    editor?.commands.focus("end");
   };
 
-  const updateNote = (patch: Partial<NoteDetail>) => {
-    setSelectedNote((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, ...patch, updatedAt: nowIso() };
-      scheduleSave(next);
-      setNotes((list) =>
-        list.map((note) =>
-          note.id === next.id ? { ...note, title: next.title, folderId: next.folderId, updatedAt: next.updatedAt } : note
-        )
-      );
-      return next;
-    });
+  const handleCancelEdit = () => {
+    if (!selectedNote || !editor) return;
+    setDraftTitle(selectedNote.title ?? "");
+    setDraftFolderId(selectedNote.folderId ?? null);
+    setIsEditing(false);
+    const nextContent =
+      selectedNote?.contentTiptap
+        ? parseContentTiptap(selectedNote.contentTiptap) ?? EMPTY_DOC
+        : toDocFromText(selectedNote?.content ?? "");
+    editor.commands.setContent(nextContent, {emitUpdate: false});    
+  };
+
+  const handleSaveEdit = async () => {
+    if (!selectedNote || !editor || !hasNotesBridge) return;
+    const updated: NoteDetail = {
+      ...selectedNote,
+      title: draftTitle.trim() || "제목 없는 노트",
+      folderId: draftFolderId ?? null,
+      content: editor.getText({ blockSeparator: "\n" }),
+      contentTiptap: editor.getJSON(),
+      updatedAt: nowIso(),
+    };
+    await window.api.notes.upsertNote(updated);
+    setSelectedNote(updated);
+    setSelectedFolderId(updated.folderId ?? null);
+    await refreshTree();
+    setIsEditing(false);
+    // flashStatus("노트를 저장했습니다.");
+  };
+
+  const handleSetLink = () => {
+    if (!editor || !isEditingRef.current) return;
+    const previous = editor.getAttributes("link").href as string | undefined;
+    const url = window.prompt("링크 주소를 입력하세요.", previous ?? "");
+    if (url === null) return;
+    if (!url) {
+      editor.chain().focus().unsetLink().run();
+      return;
+    }
+    editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
+  };
+
+  const clearSlash = () => {
+    if (!editor) return;
+    const { $from } = editor.state.selection;
+    const parent = $from.parent;
+    if (parent.type.name !== "paragraph" || parent.textContent !== "/") return;
+    const from = $from.start();
+    editor.commands.deleteRange({ from, to: from + 1 });
+  };
+
+  const runSlashCommand = (action: () => void) => {
+    if (!editor) return;
+    clearSlash();
+    action();
   };
 
   const handleCreateFolder = async (parentId: string | null) => {
@@ -403,6 +836,7 @@ export default function Note() {
       id,
       title: "제목 없는 노트",
       content: "",
+      contentTiptap: EMPTY_DOC,
       folderId,
       createdAt,
       updatedAt: createdAt,
@@ -448,27 +882,10 @@ export default function Note() {
     setExpandedFolders((prev) => ({ ...prev, [folderId]: !prev[folderId] }));
   };
 
-  const insertMarkdown = (prefix: string, suffix = "") => {
-    const area = editorRef.current;
-    if (!area || !selectedNote) return;
-    const start = area.selectionStart ?? 0;
-    const end = area.selectionEnd ?? 0;
-    const before = selectedNote.content.slice(0, start);
-    const selected = selectedNote.content.slice(start, end) || "텍스트";
-    const after = selectedNote.content.slice(end);
-    const next = `${before}${prefix}${selected}${suffix}${after}`;
-    updateNote({ content: next });
-    requestAnimationFrame(() => {
-      area.focus();
-      const caret = start + prefix.length + selected.length + suffix.length;
-      area.setSelectionRange(caret, caret);
-    });
-  };
-
   const handleUploadFiles = async (files: FileList | File[]) => {
     if (!selectedNote || !hasNotesBridge) return;
     const list = Array.from(files);
-    let nextContent = selectedNote.content;
+    let didAttach = false;
     for (const file of list) {
       const dataUrl = await fileToDataUrl(file);
       const attachment = await window.api.notes.addAttachment({
@@ -477,17 +894,17 @@ export default function Note() {
         dataUrl,
       });
       if (!attachment) continue;
+      didAttach = true;
       setSelectedNote((prev) => {
         if (!prev) return prev;
         return { ...prev, attachments: [...prev.attachments, attachment] };
       });
-      if (attachment.kind === "image") {
-        const imageTag = `\n\n![${attachment.name}](${toFileUrl(attachment.path)})\n`;
-        nextContent = `${nextContent}${imageTag}`;
-        updateNote({ content: nextContent });
-      } else {
-        touchNote();
+      if (attachment.kind === "image" && editor && isEditingRef.current) {
+        editor.chain().focus().setImage({ src: toFileUrl(attachment.path), alt: attachment.name }).run();
       }
+    }
+    if (didAttach) {
+      await bumpNoteUpdatedAt();
     }
   };
 
@@ -498,7 +915,7 @@ export default function Note() {
       if (!prev) return prev;
       return { ...prev, attachments: prev.attachments.filter((att) => att.id !== attachmentId) };
     });
-    touchNote();
+    await bumpNoteUpdatedAt();
   };
 
   const handleDownloadAttachment = async (attachment: NoteAttachment) => {
@@ -508,7 +925,7 @@ export default function Note() {
 
   const handleExportPdf = async () => {
     if (!selectedNote || !hasNotesBridge) return;
-    const html = previewRef.current?.innerHTML ?? "";
+    const html = editor?.getHTML() ?? "";
     const result = await window.api.notes.exportPdf({
       title: selectedNote.title || "노트",
       html,
@@ -524,20 +941,79 @@ export default function Note() {
     const nextLinks = linkedTodoIds.includes(todoId)
       ? linkedTodoIds.filter((id) => id !== todoId)
       : [...linkedTodoIds, todoId];
-    setSelectedNote((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, todoLinks: nextLinks, updatedAt: nowIso() };
-      scheduleSave(next);
-      setNotes((list) =>
-        list.map((note) => (note.id === next.id ? { ...note, updatedAt: next.updatedAt } : note))
-      );
-      return next;
-    });
+    const next = { ...selectedNote, todoLinks: nextLinks };
+    setSelectedNote(next);
     await window.api.notes.updateLinks({ noteId: selectedNote.id, todoIds: nextLinks });
+    await bumpNoteUpdatedAt(next);
   };
 
   const imageAttachments = selectedNote?.attachments.filter((att) => att.kind === "image") ?? [];
   const fileAttachments = selectedNote?.attachments.filter((att) => att.kind === "file") ?? [];
+  const attachmentCount = selectedNote?.attachments.length ?? 0;
+  const selectedFolderName = selectedNote?.folderId
+    ? folders.find((folder) => folder.id === selectedNote.folderId)?.name ?? "폴더 없음"
+    : "최상위";
+  const linkedTodos = todoItems.filter((todo) => linkedTodoIds.includes(todo.id));
+  const canEdit = Boolean(editor && isEditing);
+  const editorBodyClass =
+    "min-h-[360px] flex-1 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4";
+  const markdownSource = selectedNote?.content ?? "";
+  const shouldRenderMarkdown =
+    !isEditing && isPlainDoc(selectedNote?.contentTiptap) && hasMarkdownSyntax(markdownSource);
+  const toolbarGroupClass =
+    "flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 shadow-sm";
+  const toolbarLabelClass = "text-[10px] font-semibold uppercase tracking-wide text-slate-400";
+  const toolbarDividerClass = "mx-1 h-4 w-px bg-slate-200";
+  const toolbarButtonClass = (active = false) =>
+    `rounded-lg border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${active ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white hover:bg-slate-50"}`;
+  const slashMenuItems = editor
+    ? [
+      {
+        label: "Heading 1",
+        action: () => editor.chain().focus().toggleHeading({ level: 1 }).run(),
+      },
+      {
+        label: "Heading 2",
+        action: () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
+      },
+      {
+        label: "Heading 3",
+        action: () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
+      },
+      {
+        label: "Bullet List",
+        action: () => editor.chain().focus().toggleBulletList().run(),
+      },
+      {
+        label: "Ordered List",
+        action: () => editor.chain().focus().toggleOrderedList().run(),
+      },
+      {
+        label: "Task List",
+        action: () => editor.chain().focus().toggleTaskList().run(),
+      },
+      {
+        label: "Table",
+        action: () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
+      },
+      {
+        label: "Code Block",
+        action: () => editor.chain().focus().toggleCodeBlock().run(),
+      },
+      {
+        label: "Blockquote",
+        action: () => editor.chain().focus().toggleBlockquote().run(),
+      },
+      {
+        label: "Select Block",
+        action: () => editor.chain().focus().insertContent({ type: "selectBlock" }).run(),
+      },
+      {
+        label: "Chart Block",
+        action: () => editor.chain().focus().insertContent({ type: "chartBlock" }).run(),
+      },
+    ]
+    : [];
 
   const renderFolder = (folder: NoteFolder, depth: number) => {
     const isExpanded = expandedFolders[folder.id] ?? false;
@@ -571,9 +1047,16 @@ export default function Note() {
             <input
               value={folderDraftName}
               onChange={(e) => setFolderDraftName(e.target.value)}
-              onInput={(e) => setFolderDraftName((e.target as HTMLInputElement).value)}
+              onCompositionStart={() => {
+                isFolderComposingRef.current = true;
+              }}
+              onCompositionEnd={(event) => {
+                isFolderComposingRef.current = false;
+                setFolderDraftName(event.currentTarget.value);
+              }}
               onBlur={() => handleFolderRenameCommit(folder.id)}
               onKeyDown={(e) => {
+                if (isFolderComposingRef.current) return;
                 if (e.key === "Enter") handleFolderRenameCommit(folder.id);
                 if (e.key === "Escape") {
                   setFolderEditId(null);
@@ -716,7 +1199,7 @@ export default function Note() {
           </div>
         </aside>
 
-        <main className="flex-1 rounded-2xl border border-slate-200 bg-white/80 p-4">
+        <main className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-slate-200 bg-white/80 p-4">
           {!selectedNote ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
               <Folder size={24} />
@@ -724,266 +1207,499 @@ export default function Note() {
               {statusMessage ? <div className="text-xs text-emerald-600">{statusMessage}</div> : null}
             </div>
           ) : (
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <input
-                  value={selectedNote.title}
-                  onChange={(e) => updateNote({ title: e.target.value })}
-                  className="min-w-[220px] flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                  placeholder="노트 제목"
-                />
-                <select
-                  value={selectedNote.folderId ?? ""}
-                  onChange={(e) => updateNote({ folderId: e.target.value || null })}
-                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                >
-                  <option value="">최상위</option>
-                  {folders.map((folder) => (
-                    <option key={folder.id} value={folder.id}>
-                      {folder.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
-                  onClick={() => selectedNote && window.api?.notes?.upsertNote(selectedNote)}
-                >
-                  <Save size={14} />
-                  저장
-                </button>
-                <button
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
-                  onClick={handleExportPdf}
-                >
-                  <Download size={14} />
-                  PDF 내보내기
-                </button>
-                <button
-                  className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 hover:bg-rose-100"
-                  onClick={handleDeleteNote}
-                >
-                  <Trash2 size={14} />
-                  삭제
-                </button>
-                {statusMessage ? <span className="text-xs text-emerald-600">{statusMessage}</span> : null}
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                    <span className="font-medium text-slate-700">에디터</span>
-                    <button
-                      className="rounded border border-slate-200 bg-white px-2 py-1"
-                      onClick={() => insertMarkdown("**", "**")}
-                    >
-                      굵게
-                    </button>
-                    <button
-                      className="rounded border border-slate-200 bg-white px-2 py-1"
-                      onClick={() => insertMarkdown("*", "*")}
-                    >
-                      기울임
-                    </button>
-                    <button
-                      className="rounded border border-slate-200 bg-white px-2 py-1"
-                      onClick={() => insertMarkdown("# ")}
-                    >
-                      제목
-                    </button>
-                    <button
-                      className="rounded border border-slate-200 bg-white px-2 py-1"
-                      onClick={() => insertMarkdown("- ")}
-                    >
-                      목록
-                    </button>
-                    <button
-                      className="rounded border border-slate-200 bg-white px-2 py-1"
-                      onClick={() => insertMarkdown("```\n", "\n```")}
-                    >
-                      코드
-                    </button>
-                  </div>
-                  <textarea
-                    ref={editorRef}
-                    value={selectedNote.content}
-                    onChange={(e) => updateNote({ content: e.target.value })}
-                    className="h-72 w-full rounded-2xl border border-slate-200 bg-white p-3 text-sm"
-                    placeholder="마크다운으로 노트를 작성하세요..."
-                  />
-                </div>
-                <div className="space-y-2">
-                  <div className="text-xs font-medium text-slate-700">미리보기</div>
-                  <div className="h-72 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-3">
-                    <div ref={previewRef} className="markdown">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {selectedNote.content || "아직 작성된 내용이 없습니다."}
-                      </ReactMarkdown>
+            <div className="flex h-full flex-col gap-5">
+              <section className="rounded-2xl border border-slate-200 bg-white/90 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                      {isEditing ? "편집 모드" : "상세 보기"}
                     </div>
+                    {isEditing ? (
+                      <input
+                        value={draftTitle}
+                        onChange={(event) => setDraftTitle(event.target.value)}
+                        onCompositionStart={() => {
+                          isTitleComposingRef.current = true;
+                        }}
+                        onCompositionEnd={(event) => {
+                          isTitleComposingRef.current = false;
+                          setDraftTitle(event.currentTarget.value);
+                        }}
+                        className="w-full min-w-[240px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                        placeholder="노트 제목"
+                      />
+                    ) : (
+                      <div className="text-xl font-semibold text-slate-900">
+                        {selectedNote.title || "제목 없는 노트"}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      <span>생성 {formatDateTime(selectedNote.createdAt)}</span>
+                      <span>수정 {formatDateTime(selectedNote.updatedAt)}</span>
+                      <span>{attachmentCount ? `첨부 ${attachmentCount}개` : "첨부 없음"}</span>
+                      <span>{linkedTodoIds.length ? `업무 ${linkedTodoIds.length}개` : "업무 연결 없음"}</span>
+                    </div>
+                    {isEditing ? (
+                      <select
+                        value={draftFolderId ?? ""}
+                        onChange={(event) => setDraftFolderId(event.target.value || null)}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      >
+                        <option value="">최상위</option>
+                        {folders.map((folder) => (
+                          <option key={folder.id} value={folder.id}>
+                            {folder.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="text-xs text-slate-500">폴더: {selectedFolderName}</div>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!isEditing ? (
+                      <>
+                        <button
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
+                          onClick={handleStartEdit}
+                        >
+                          <Pencil size={14} />
+                          수정
+                        </button>
+                        <button
+                          className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 hover:bg-rose-100"
+                          onClick={handleDeleteNote}
+                        >
+                          <Trash2 size={14} />
+                          삭제
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
+                          onClick={handleSaveEdit}
+                        >
+                          <Save size={14} />
+                          저장
+                        </button>
+                        <button
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
+                          onClick={handleCancelEdit}
+                        >
+                          <X size={14} />
+                          취소
+                        </button>
+                      </>
+                    )}
+                    <button
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
+                      onClick={handleExportPdf}
+                    >
+                      <Download size={14} />
+                      PDF
+                    </button>
+                    {statusMessage ? <span className="text-xs text-emerald-600">{statusMessage}</span> : null}
                   </div>
                 </div>
-              </div>
+              </section>
 
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs font-medium text-slate-700">첨부파일</div>
-                    <button
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <Upload size={12} />
-                      업로드
-                    </button>
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      className="hidden"
-                      multiple
-                      onChange={(e) => {
-                        if (e.target.files?.length) handleUploadFiles(e.target.files);
-                        e.currentTarget.value = "";
+              <div className="flex flex-col gap-4">
+                <section className="flex min-h-0 flex-col gap-3 rounded-2xl border border-slate-200 bg-white/90 p-4">
+                  {canEdit && editor ? (
+                    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2 text-xs text-slate-600">
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>텍스트</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass(editor.isActive("bold"))}
+                          onClick={() => editor.chain().focus().toggleBold().run()}
+                        >
+                          굵게
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("italic"))}
+                          onClick={() => editor.chain().focus().toggleItalic().run()}
+                        >
+                          기울임
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("strike"))}
+                          onClick={() => editor.chain().focus().toggleStrike().run()}
+                        >
+                          취소선
+                        </button>
+                        <button className={toolbarButtonClass(editor.isActive("link"))} onClick={handleSetLink}>
+                          링크
+                        </button>
+                      </div>
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>헤딩</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass(editor.isActive("heading", { level: 1 }))}
+                          onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+                        >
+                          H1
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("heading", { level: 2 }))}
+                          onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+                        >
+                          H2
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("heading", { level: 3 }))}
+                          onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
+                        >
+                          H3
+                        </button>
+                      </div>
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>목록</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass(editor.isActive("bulletList"))}
+                          onClick={() => editor.chain().focus().toggleBulletList().run()}
+                        >
+                          목록
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("orderedList"))}
+                          onClick={() => editor.chain().focus().toggleOrderedList().run()}
+                        >
+                          번호
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("taskList"))}
+                          onClick={() => editor.chain().focus().toggleTaskList().run()}
+                        >
+                          체크
+                        </button>
+                      </div>
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>블록</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass(editor.isActive("blockquote"))}
+                          onClick={() => editor.chain().focus().toggleBlockquote().run()}
+                        >
+                          인용
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive("codeBlock"))}
+                          onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+                        >
+                          코드
+                        </button>
+                      </div>
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>정렬</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass(editor.isActive({ textAlign: "left" }))}
+                          onClick={() => editor.chain().focus().setTextAlign("left").run()}
+                        >
+                          좌
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive({ textAlign: "center" }))}
+                          onClick={() => editor.chain().focus().setTextAlign("center").run()}
+                        >
+                          중
+                        </button>
+                        <button
+                          className={toolbarButtonClass(editor.isActive({ textAlign: "right" }))}
+                          onClick={() => editor.chain().focus().setTextAlign("right").run()}
+                        >
+                          우
+                        </button>
+                      </div>
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>표</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() =>
+                            editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+                          }
+                        >
+                          표
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().addRowAfter().run()}
+                          disabled={!editor.isActive("table")}
+                        >
+                          행+
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().addColumnAfter().run()}
+                          disabled={!editor.isActive("table")}
+                        >
+                          열+
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().deleteTable().run()}
+                          disabled={!editor.isActive("table")}
+                        >
+                          표 삭제
+                        </button>
+                      </div>
+                      <div className={toolbarGroupClass}>
+                        <span className={toolbarLabelClass}>확장</span>
+                        <span className={toolbarDividerClass} />
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "selectBlock" }).run()}
+                        >
+                          Select
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "chartBlock" }).run()}
+                        >
+                          Chart
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {editor ? (
+                    shouldRenderMarkdown ? (
+                      <div className={`${editorBodyClass} markdown`}>
+                        {markdownSource.trim() ? (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdownSource}</ReactMarkdown>
+                        ) : (
+                          <div className="text-sm text-slate-400">내용이 없습니다.</div>
+                        )}
+                      </div>
+                    ) : (
+                      <EditorContent editor={editor} className={`tiptap ${editorBodyClass}`} />
+                    )
+                  ) : (
+                    <div className={`${editorBodyClass} text-sm text-slate-400`}>에디터를 불러오는 중...</div>
+                  )}
+
+                  {editor ? (
+                    <FloatingMenu
+                      editor={editor}                      
+                      options={{ placement: "bottom-start" }}
+                      shouldShow={({ editor: menuEditor }) => {
+                        if (!isEditingRef.current) return false;
+                        const { $from } = menuEditor.state.selection;
+                        return $from.parent.type.name === "paragraph" && $from.parent.textContent === "/";
                       }}
-                    />
-                  </div>
+                    >
+                      <div className="flex w-52 flex-col gap-1 rounded-2xl border border-slate-200 bg-white p-2 text-xs shadow-lg">
+                        {slashMenuItems.map((item) => (
+                          <button
+                            key={item.label}
+                            className="rounded-lg px-2 py-1 text-left hover:bg-slate-100"
+                            onClick={() => runSlashCommand(item.action)}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    </FloatingMenu>
+                  ) : null}
+                </section>
 
-                  <div
-                    className={`rounded-2xl border border-dashed p-4 text-center text-sm ${isDragging ? "border-amber-400 bg-amber-50" : "border-slate-200 bg-slate-50"}`}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setIsDragging(true);
-                    }}
-                    onDragLeave={() => setIsDragging(false)}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setIsDragging(false);
-                      if (e.dataTransfer.files?.length) handleUploadFiles(e.dataTransfer.files);
-                    }}
-                  >
-                    파일을 끌어다 놓거나 업로드 버튼을 사용하세요.
-                  </div>
+                <aside className="space-y-4">
+                  {linkedTodos.length > 0 ? (
+                    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                      <div className="text-xs font-medium text-slate-700">연결된 업무</div>
+                      <div className="mt-2 space-y-2">
+                        {linkedTodos.map((todo) => (
+                          <div key={todo.id} className="flex items-center gap-2">
+                            <button
+                              className="min-w-0 flex-1 truncate text-left text-sm text-slate-800"
+                              onClick={() => onOpenTodo?.(todo.id)}
+                            >
+                              {todo.title || "제목 없는 업무"}
+                            </button>
+                            <button
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+                              onClick={() => onOpenTodo?.(todo.id)}
+                            >
+                              열기
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
-                  {imageAttachments.length > 0 ? (
-                    <div className="space-y-2">
-                      <div className="text-xs font-medium text-slate-700">이미지</div>
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        {imageAttachments.map((att) => (
-                          <div key={att.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                            <img src={toFileUrl(att.path)} alt={att.name} className="h-32 w-full object-cover" />
-                            <div className="flex items-center justify-between gap-2 p-2 text-xs">
-                              <div className="min-w-0">
-                                <div className="truncate font-medium text-slate-700">{att.name}</div>
-                                <div className="text-[11px] text-slate-400">{formatFileSize(att.size)}</div>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-medium text-slate-700">첨부파일</div>
+                      <button
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] disabled:opacity-40"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!isEditing}
+                      >
+                        <Upload size={12} />
+                        업로드
+                      </button>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        className="hidden"
+                        multiple
+                        onChange={(e) => {
+                          if (e.target.files?.length) handleUploadFiles(e.target.files);
+                          e.currentTarget.value = "";
+                        }}
+                      />
+                    </div>
+
+                    <div
+                      className={`mt-2 rounded-xl border border-dashed p-3 text-center text-xs ${isDragging ? "border-amber-400 bg-amber-50" : "border-slate-200 bg-slate-50"}`}
+                      onDragOver={(e) => {
+                        if (!isEditing) return;
+                        e.preventDefault();
+                        setIsDragging(true);
+                      }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={(e) => {
+                        if (!isEditing) return;
+                        e.preventDefault();
+                        setIsDragging(false);
+                        if (e.dataTransfer.files?.length) handleUploadFiles(e.dataTransfer.files);
+                      }}
+                    >
+                      {isEditing
+                        ? "파일을 끌어다 놓거나 업로드 버튼을 사용하세요."
+                        : "편집 모드에서 업로드할 수 있습니다."}
+                    </div>
+
+                    {imageAttachments.length > 0 ? (
+                      <div className="mt-3 space-y-2">
+                        <div className="text-[11px] font-medium text-slate-700">이미지</div>
+                        <div className="grid grid-cols-1 gap-2">
+                          {imageAttachments.map((att) => (
+                            <div key={att.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                              <img src={toFileUrl(att.path)} alt={att.name} className="h-28 w-full object-cover" />
+                              <div className="flex items-center justify-between gap-2 p-2 text-[11px]">
+                                <div className="min-w-0">
+                                  <div className="truncate font-medium text-slate-700">{att.name}</div>
+                                  <div className="text-[10px] text-slate-400">{formatFileSize(att.size)}</div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1"
+                                    onClick={() => handleDownloadAttachment(att)}
+                                  >
+                                    다운로드
+                                  </button>
+                                  <button
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1"
+                                    onClick={() => handleRemoveAttachment(att.id)}
+                                  >
+                                    삭제
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {fileAttachments.length > 0 ? (
+                      <div className="mt-3 space-y-2">
+                        <div className="text-[11px] font-medium text-slate-700">파일</div>
+                        <div className="space-y-2">
+                          {fileAttachments.map((att) => (
+                            <div
+                              key={att.id}
+                              className="flex items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2"
+                            >
+                              <div className="flex min-w-0 items-center gap-2">
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 text-slate-500">
+                                  <FileText size={16} />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="truncate text-xs font-medium text-slate-800">{att.name}</div>
+                                  <div className="text-[10px] text-slate-400">
+                                    {formatFileSize(att.size)} · {fileKindLabel(att)}
+                                  </div>
+                                </div>
                               </div>
                               <div className="flex items-center gap-2">
                                 <button
-                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1"
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] hover:bg-slate-50"
+                                  onClick={() => hasFileBridge && window.api.files.open(att.path)}
+                                >
+                                  열기
+                                </button>
+                                <button
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] hover:bg-slate-50"
                                   onClick={() => handleDownloadAttachment(att)}
                                 >
                                   다운로드
                                 </button>
                                 <button
-                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1"
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] hover:bg-slate-50"
                                   onClick={() => handleRemoveAttachment(att.id)}
                                 >
                                   삭제
                                 </button>
                               </div>
                             </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
-
-                  {fileAttachments.length > 0 ? (
-                    <div className="space-y-2">
-                      <div className="text-xs font-medium text-slate-700">파일</div>
-                      <div className="space-y-2">
-                        {fileAttachments.map((att) => (
-                          <div
-                            key={att.id}
-                            className="flex items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2"
-                          >
-                            <div className="flex min-w-0 items-center gap-2">
-                              <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 text-slate-500">
-                                <FileText size={16} />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-medium text-slate-800">{att.name}</div>
-                                <div className="text-[11px] text-slate-400">
-                                  {formatFileSize(att.size)} · {fileKindLabel(att)}
-                                </div>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <button
-                                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                                onClick={() => hasFileBridge && window.api.files.open(att.path)}
-                              >
-                                열기
-                              </button>
-                              <button
-                                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                                onClick={() => handleDownloadAttachment(att)}
-                              >
-                                다운로드
-                              </button>
-                              <button
-                                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                                onClick={() => handleRemoveAttachment(att.id)}
-                              >
-                                삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs font-medium text-slate-700">연결된 업무</div>
-                    <div className="text-xs text-slate-400">
-                      {linkedTodoIds.length ? `${linkedTodoIds.length}개 연결됨` : "연결 없음"}
-                    </div>
+                    ) : null}
                   </div>
+
                   <div className="rounded-2xl border border-slate-200 bg-white p-3">
-                    <div className="flex items-center gap-2">
-                      <Link2 size={14} className="text-slate-400" />
-                      <input
-                        value={todoSearch}
-                        onChange={(e) => setTodoSearch(e.target.value)}
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
-                        placeholder="업무 검색"
-                      />
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-medium text-slate-700">업무 연결</div>
+                      <div className="text-[11px] text-slate-400">
+                        {linkedTodoIds.length ? `${linkedTodoIds.length}개 연결됨` : "연결 없음"}
+                      </div>
                     </div>
-                    <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1 text-sm">
-                      {filteredTodos.length === 0 ? (
-                        <div className="text-xs text-slate-500">표시할 업무가 없습니다.</div>
-                      ) : (
-                        filteredTodos.map((todo) => {
-                          const checked = linkedTodoIds.includes(todo.id);
-                          return (
-                            <label key={todo.id} className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => handleTodoToggle(todo.id)}
-                              />
-                              <span className="min-w-0 flex-1 truncate">{todo.title || "제목 없는 업무"}</span>
-                              <span className="text-xs text-slate-400">{todo.date}</span>
-                            </label>
-                          );
-                        })
-                      )}
+                    <div className="mt-2 rounded-xl border border-slate-200 bg-white p-2">
+                      <div className="flex items-center gap-2">
+                        <Link2 size={14} className="text-slate-400" />
+                        <input
+                          value={todoSearch}
+                          onChange={(e) => setTodoSearch(e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+                          placeholder="업무 검색"
+                        />
+                      </div>
+                      <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1 text-xs">
+                        {filteredTodos.length === 0 ? (
+                          <div className="text-xs text-slate-500">표시할 업무가 없습니다.</div>
+                        ) : (
+                          filteredTodos.map((todo) => {
+                            const checked = linkedTodoIds.includes(todo.id);
+                            return (
+                              <label key={todo.id} className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => handleTodoToggle(todo.id)}
+                                />
+                                <span className="min-w-0 flex-1 truncate">{todo.title || "제목 없는 업무"}</span>
+                                <span className="text-[11px] text-slate-400">{todo.date}</span>
+                              </label>
+                            );
+                          })
+                        )}
+                      </div>
                     </div>
                   </div>
+
                   <div className="rounded-2xl border border-slate-200 bg-white p-3 text-xs text-slate-500">
                     업무 목록과 노트를 연결해 정리하세요.
                   </div>
-                </div>
+                </aside>
               </div>
             </div>
           )}

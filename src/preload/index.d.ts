@@ -31,6 +31,8 @@ export interface ApiBridge {
     close: () => Promise<void>;
     isMaximized: () => Promise<boolean>;
     theme: () => Promise<string>;
+    getOpacity: () => Promise<number>;
+    setOpacity: (value: number) => Promise<number>;
     onMaximizedChanged: (cb: (isMax: boolean) => void) => () => void;
   };
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -34,9 +34,10 @@ import {
   FileVideoCamera,
   GripVertical,
   ListChecks,
+  Maximize2,
   Minus,
+  Minimize2,
   Plus,
-  Square,
   Trash2,
   X,
   Save,
@@ -51,7 +52,7 @@ import Chat from "./pages/Chat";
 import SettingPanel from "./pages/SettingPanel";
 
 export type TodoStatus = "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
-export type TabKey = "LIST" | "CALENDAR" | "CHAT" | "SETTINGS" | "NOTE";
+export type TabKey = "LIST" | "CALENDAR" | "CHAT" | "SETTINGS" | "NOTE" | "LOGIN";
 
 type TodoRel = { toId: string; type: "blocks" | "relates" | "depends" };
 type LegacyImage = { id: string; name: string; dataUrl: string; createdAt: string; path?: string };
@@ -71,12 +72,22 @@ type Todo = {
   title: string;
   content: string; // markdown
   status: TodoStatus;
+  isDaily: boolean;
   date: string; // YYYY-MM-DD
   order: number;
   refs: string[];
   rels: TodoRel[];
   attachments: TodoAttachment[];
   images?: LegacyImage[];
+  linkedNoteId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type NoteSummary = {
+  id: string;
+  title: string;
+  folderId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -196,13 +207,46 @@ function pickFileIcon(file: TodoAttachment) {
 }
 
 const hasBridge = typeof window !== "undefined" && Boolean(window.api?.todos);
+const hasNotesBridge = typeof window !== "undefined" && Boolean(window.api?.notes);
 const hasWindowBridge = typeof window !== "undefined" && Boolean(window.api?.window);
 const hasFileBridge = typeof window !== "undefined" && Boolean(window.api?.files);
+
+const OPACITY_STORAGE_KEY = "todoongs.opacity";
+const LOCK_STORAGE_KEY = "todoongs.locked";
+const LOCK_ENABLED_STORAGE_KEY = "todoongs.lockEnabled";
+const LOCK_HASH_STORAGE_KEY = "todoongs.lockHash";
+const LOCK_SALT_STORAGE_KEY = "todoongs.lockSalt";
+const clampOpacity = (value: number) => Math.min(1, Math.max(0.6, value));
+const toHex = (buffer: ArrayBuffer) =>
+  Array.from(new Uint8Array(buffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+const generateSalt = () => {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto?.getRandomValues?.(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+};
+const hashPin = async (pin: string, salt: string) => {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(`${salt}:${pin}`);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+  return toHex(digest);
+};
 
 async function loadTodoSummaries(): Promise<TodoSummary[]> {
   if (hasBridge && window.api.todos.summary) {
     const items = await window.api.todos.summary();
     return (items ?? []).map((item: TodoSummary) => normalizeSummary(item));
+  }
+  return [];
+}
+
+async function loadNoteSummaries(): Promise<NoteSummary[]> {
+  if (hasNotesBridge && window.api.notes?.tree) {
+    const result = await window.api.notes.tree();
+    return result?.notes ?? [];
   }
   return [];
 }
@@ -281,9 +325,11 @@ function normalizeTodo(raw: Todo): Todo {
   const { images: _ignore, ...rest } = raw;
   return {
     ...rest,
+    isDaily: Boolean(raw.isDaily),
     refs: Array.isArray(raw.refs) ? raw.refs : [],
     rels: Array.isArray(raw.rels) ? raw.rels : [],
     attachments: [...normalizedAttachments, ...legacyAttachments],
+    linkedNoteId: raw.linkedNoteId ?? null,
   };
 }
 
@@ -292,8 +338,10 @@ function toSummary(todo: Todo): TodoSummary {
     id: todo.id,
     title: todo.title,
     status: todo.status,
+    isDaily: todo.isDaily,
     date: todo.date,
     order: todo.order,
+    linkedNoteId: todo.linkedNoteId ?? null,
     createdAt: todo.createdAt,
     updatedAt: todo.updatedAt,
   };
@@ -307,8 +355,10 @@ function normalizeSummary(raw: TodoSummary): TodoSummary {
     id: String(raw.id ?? uid()),
     title: String(raw.title ?? ""),
     status,
+    isDaily: Boolean(raw.isDaily),
     date: String(raw.date ?? ""),
     order: Number.isFinite(raw.order) ? raw.order : 0,
+    linkedNoteId: raw.linkedNoteId ?? null,
     createdAt: String(raw.createdAt ?? nowIso()),
     updatedAt: String(raw.updatedAt ?? nowIso()),
   };
@@ -378,6 +428,54 @@ function SortableTodoRow({
   );
 }
 
+function TodoRow({
+  todo,
+  isSelected,
+  onClick,
+  badgeText,
+  showDate = true,
+}: {
+  todo: Todo;
+  isSelected: boolean;
+  onClick: () => void;
+  badgeText?: string;
+  showDate?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "group flex items-center gap-3 rounded-2xl border p-3 transition",
+        isSelected ? "border-slate-900/30 bg-white shadow-sm" : "border-slate-200/70 bg-white/80"
+      )}
+    >
+      <button className="min-w-0 flex-1 text-left" onClick={onClick} title="상세 열기">
+        <div className="flex items-center gap-2">
+          <span className="truncate font-medium text-slate-900">{todo.title || "제목 없음"}</span>
+          <span
+            className={cn(
+              "shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+              STATUS_META[todo.status].badge
+            )}
+          >
+            {STATUS_META[todo.status].label}
+          </span>
+          {badgeText ? (
+            <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+              {badgeText}
+            </span>
+          ) : null}
+        </div>
+        <div className="mt-1 truncate text-xs text-slate-500">{clampText(todo.content || "내용 없음", 60)}</div>
+      </button>
+
+      {showDate ? <div className="shrink-0 text-xs text-slate-500">{todo.date}</div> : null}
+      <div className="shrink-0 text-xs text-slate-400">
+        {todo.attachments.length ? `첨부 ${todo.attachments.length}개` : ""}
+      </div>
+    </div>
+  );
+}
+
 
 function TitleBar() {
   const [isMax, setIsMax] = React.useState(false);
@@ -427,7 +525,7 @@ function TitleBar() {
             disabled={!hasWindowBridge}
             title={isMax ? "복원" : "최대화"}
           >
-            <Square size={14} />
+            {isMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
           <button
             className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1 text-sm text-rose-700 hover:bg-rose-100 disabled:opacity-50"
@@ -466,6 +564,16 @@ export default function App() {
   const [refPage, setRefPage] = useState(1);
   const [relType, setRelType] = useState<TodoRel["type"]>("depends");
   const [relTargetId, setRelTargetId] = useState<string>("");
+  const [noteSummaries, setNoteSummaries] = useState<NoteSummary[]>([]);
+  const [noteFocusId, setNoteFocusId] = useState<string | null>(null);
+  const [pendingTodoId, setPendingTodoId] = useState<string | null>(null);
+  const [appOpacity, setAppOpacity] = useState(1);
+  const [isLocked, setIsLocked] = useState(false);
+  const [lockEnabled, setLockEnabled] = useState(false);
+  const [lockHash, setLockHash] = useState<string | null>(null);
+  const [lockSalt, setLockSalt] = useState<string | null>(null);
+  const [unlockPin, setUnlockPin] = useState("");
+  const [unlockError, setUnlockError] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dayTodosRef = useRef<Todo[]>([]);
@@ -479,12 +587,21 @@ export default function App() {
   const imageAttachments = selectedAttachments.filter((att) => att.kind === "image");
   const fileAttachments = selectedAttachments.filter((att) => att.kind === "file");
 
-  const todosForDay = useMemo(() => {
+  const dailyTodos = useMemo(() => {
     return dayTodos
-      .filter((t) => t.date === selectedDate)
+      .filter((t) => t.isDaily)
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
+  }, [dayTodos]);
+
+  const dateTodos = useMemo(() => {
+    return dayTodos
+      .filter((t) => !t.isDaily && t.date === selectedDate)
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
   }, [dayTodos, selectedDate]);
+
+  const todosForDay = useMemo(() => [...dailyTodos, ...dateTodos], [dailyTodos, dateTodos]);
 
   const todosByDate = useMemo(() => {
     const m = new Map<string, TodoSummary[]>();
@@ -531,6 +648,15 @@ export default function App() {
   }, [dayTodos]);
 
   useEffect(() => {
+    if (!pendingTodoId) return;
+    const match = dayTodos.find((todo) => todo.id === pendingTodoId);
+    if (!match) return;
+    setSelectedId(match.id);
+    setPanelOpen(true);
+    setPendingTodoId(null);
+  }, [dayTodos, pendingTodoId]);
+
+  useEffect(() => {
     let active = true;
     (async () => {
       const items = await loadTodoSummaries();
@@ -541,6 +667,102 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const items = await loadNoteSummaries();
+      if (!active) return;
+      setNoteSummaries(items);
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasNotesBridge) return;
+    if (tab !== "NOTE" && tab !== "LIST") return;
+    let active = true;
+    (async () => {
+      const items = await loadNoteSummaries();
+      if (!active) return;
+      setNoteSummaries(items);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [tab]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedOpacity = window.localStorage.getItem(OPACITY_STORAGE_KEY);
+    const storedLocked = window.localStorage.getItem(LOCK_STORAGE_KEY);
+    const storedLockEnabled = window.localStorage.getItem(LOCK_ENABLED_STORAGE_KEY);
+    const storedLockHash = window.localStorage.getItem(LOCK_HASH_STORAGE_KEY);
+    const storedLockSalt = window.localStorage.getItem(LOCK_SALT_STORAGE_KEY);
+    const hasStoredPin = Boolean(storedLockHash && storedLockSalt);
+    if (storedLockHash) setLockHash(storedLockHash);
+    if (storedLockSalt) setLockSalt(storedLockSalt);
+    if (storedLockEnabled === "1" && hasStoredPin) {
+      setLockEnabled(true);
+      if (storedLocked) setIsLocked(storedLocked === "1");
+    } else {
+      setLockEnabled(false);
+      setIsLocked(false);
+    }
+    if (storedOpacity) {
+      const next = clampOpacity(Number(storedOpacity));
+      setAppOpacity(next);
+      if (hasWindowBridge) void window.api.window.setOpacity(next);
+      return;
+    }
+    if (hasWindowBridge) {
+      window.api.window.getOpacity().then((value) => {
+        const next = clampOpacity(Number(value) || 1);
+        setAppOpacity(next);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(LOCK_STORAGE_KEY, isLocked ? "1" : "0");
+  }, [isLocked]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(LOCK_ENABLED_STORAGE_KEY, lockEnabled ? "1" : "0");
+    if (!lockEnabled) setIsLocked(false);
+  }, [lockEnabled]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (lockHash) window.localStorage.setItem(LOCK_HASH_STORAGE_KEY, lockHash);
+    if (lockSalt) window.localStorage.setItem(LOCK_SALT_STORAGE_KEY, lockSalt);
+  }, [lockHash, lockSalt]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const next = clampOpacity(appOpacity);
+    window.localStorage.setItem(OPACITY_STORAGE_KEY, String(next));
+    if (hasWindowBridge) void window.api.window.setOpacity(next);
+  }, [appOpacity]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (event: KeyboardEvent) => {
+      if (!lockEnabled || !lockHash || !lockSalt) return;
+      if (!event.ctrlKey) return;
+      if (event.key.toLowerCase() !== "l") return;
+      event.preventDefault();
+      setUnlockPin("");
+      setUnlockError("");
+      setIsLocked(true);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [lockEnabled, lockHash, lockSalt]);
 
   useEffect(() => {
     let active = true;
@@ -570,7 +792,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedId) return;
     const match = dayTodos.find((t) => t.id === selectedId);
-    if (!match || match.date !== selectedDate) {
+    if (!match || (!match.isDaily && match.date !== selectedDate)) {
       setSelectedId(null);
       setPanelOpen(false);
     }
@@ -640,12 +862,17 @@ export default function App() {
     });
   };
 
-  const applyTodoUpdate = (todo: Todo) => {
+  const applyTodoUpdate = (todo: Todo, options?: { immediate?: boolean }) => {
     setDayTodos((prev) => {
       const next = prev.map((t) => (t.id === todo.id ? todo : t));
-      return next.filter((t) => t.date === selectedDate);
+      return next.filter((t) => t.date === selectedDate || t.isDaily);
     });
     upsertSummary(todo);
+    if (options?.immediate) {
+      clearPendingSave(todo.id);
+      void upsertTodo(todo).catch(() => { });
+      return;
+    }
     scheduleUpsert(todo);
   };
 
@@ -660,6 +887,32 @@ export default function App() {
     setSelectedDate(toYMD(d));
   };
 
+  const hasLockPassword = Boolean(lockHash && lockSalt);
+
+  const handleSetLockPin = async (pin: string) => {
+    const salt = generateSalt();
+    const hash = await hashPin(pin, salt);
+    setLockSalt(salt);
+    setLockHash(hash);
+    setLockEnabled(true);
+  };
+
+  const handleUnlock = async () => {
+    if (!lockSalt || !lockHash) return;
+    if (!/^\d{4,6}$/.test(unlockPin)) {
+      setUnlockError("비밀번호는 4~6자리 숫자입니다.");
+      return;
+    }
+    const hash = await hashPin(unlockPin, lockSalt);
+    if (hash === lockHash) {
+      setIsLocked(false);
+      setUnlockPin("");
+      setUnlockError("");
+      return;
+    }
+    setUnlockError("비밀번호가 일치하지 않습니다.");
+  };
+
   const pickDateFromCalendar = (ymd: string) => {
     setSelectedDate(ymd);
     setTab("LIST");
@@ -667,18 +920,34 @@ export default function App() {
     setPanelOpen(false);
   };
 
+  const openTodoFromNote = (todoId: string) => {
+    const summary = summaryTodos.find((item) => item.id === todoId);
+    if (!summary) return;
+    const targetDate = summary.isDaily ? selectedDate : summary.date;
+    setSelectedDate(targetDate);
+    setTab("LIST");
+    setPendingTodoId(todoId);
+  };
+
+  const openNoteFromTodo = (noteId: string) => {
+    setTab("NOTE");
+    setNoteFocusId(noteId);
+  };
+
   const createTodo = () => {
-    const maxOrder = todosForDay.length ? Math.max(...todosForDay.map((t) => t.order)) : -1;
+    const maxOrder = dateTodos.length ? Math.max(...dateTodos.map((t) => t.order)) : -1;
     const t: Todo = {
       id: uid(),
       title: "",
       content: "",
       status: "TODO",
+      isDaily: false,
       date: selectedDate,
       order: maxOrder + 1,
       refs: [],
       rels: [],
       attachments: [],
+      linkedNoteId: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
@@ -693,8 +962,8 @@ export default function App() {
     const current = getTodoById(id);
     if (!current) return;
     const updated = { ...current, ...patch, updatedAt: nowIso() };
-    applyTodoUpdate(updated);
-    if (patch.date && patch.date !== selectedDate) {
+    applyTodoUpdate(updated, { immediate: Object.prototype.hasOwnProperty.call(patch, "isDaily") });
+    if (patch.date && patch.date !== selectedDate && !updated.isDaily) {
       setSelectedId(null);
       setPanelOpen(false);
     }
@@ -734,7 +1003,7 @@ export default function App() {
     const activeId = String(active.id);
     const overId = String(over.id);
 
-    const dayIds = todosForDay.map((t) => t.id);
+    const dayIds = dateTodos.map((t) => t.id);
     if (!dayIds.includes(activeId) || !dayIds.includes(overId)) return;
 
     const oldIndex = dayIds.indexOf(activeId);
@@ -1059,20 +1328,42 @@ export default function App() {
               </div>
 
               <div className="p-4">
+                {dailyTodos.length > 0 ? (
+                  <div className="mb-4 rounded-2xl border border-amber-200/70 bg-amber-50/60 p-3">
+                    <div className="mb-2 flex items-center justify-between text-xs font-medium text-amber-900">
+                      <span>매일 할 일</span>
+                      <span>{dailyTodos.length}개</span>
+                    </div>
+                    <div className="space-y-2">
+                      {dailyTodos.map((t) => (
+                        <TodoRow
+                          key={t.id}
+                          todo={t}
+                          isSelected={t.id === selectedId}
+                          onClick={() => openPanel(t.id)}
+                          badgeText="매일"
+                          showDate={false}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <DndContext
                   sensors={sensors}
                   collisionDetection={closestCenter}
                   onDragStart={onDragStart}
                   onDragEnd={onDragEnd}
                 >
-                  <SortableContext items={todosForDay.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+                  <SortableContext items={dateTodos.map((t) => t.id)} strategy={verticalListSortingStrategy}>
                     <div className="space-y-2">
-                      {todosForDay.length === 0 ? (
+                      {dateTodos.length === 0 ? (
                         <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-500">
-                          {selectedDate}에 등록된 할 일이 없습니다. 새로 추가하세요.
+                          {dailyTodos.length
+                            ? "선택한 날짜에 추가 할 일이 없습니다."
+                            : `${selectedDate}에 등록된 할 일이 없습니다. 새로 추가하세요.`}
                         </div>
                       ) : (
-                        todosForDay.map((t) => (
+                        dateTodos.map((t) => (
                           <SortableTodoRow
                             key={t.id}
                             todo={t}
@@ -1110,14 +1401,28 @@ export default function App() {
           )}
 
           {tab === "NOTE" && (
-            <Note />
+            <Note
+              focusNoteId={noteFocusId}
+              onFocusHandled={() => setNoteFocusId(null)}
+              onOpenTodo={openTodoFromNote}
+            />
           )}
 
           {tab === "CHAT" && (
             <Chat />
           )}
           {tab === "SETTINGS" && (
-            <SettingPanel />
+            <SettingPanel
+              opacity={appOpacity}
+              onOpacityChange={(value) => setAppOpacity(clampOpacity(value))}
+              isLocked={isLocked}
+              lockEnabled={lockEnabled}
+              hasLockPassword={hasLockPassword}
+              onToggleLock={(next) => setIsLocked(next)}
+              onToggleLockEnabled={(next) => setLockEnabled(next)}
+              onSetLockPin={handleSetLockPin}
+              canControlWindow={hasWindowBridge}
+            />
           )}
         </div>
         <div className="relative">
@@ -1168,7 +1473,7 @@ export default function App() {
                       />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
                       <div className="space-y-2">
                         <label className="text-xs font-medium text-slate-700">상태</label>
                         <select
@@ -1192,6 +1497,45 @@ export default function App() {
                           className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
                         />
                       </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-medium text-slate-700">반복</label>
+                        <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selectedTodo.isDaily)}
+                            onChange={(e) => patchTodo(selectedTodo.id, { isDaily: e.target.checked })}
+                          />
+                          <span>매일</span>
+                        </label>
+                        <div className="text-[11px] text-slate-500">매일 할 일은 모든 날짜에 고정 표시됩니다.</div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-slate-700">연결 노트</label>
+                        {selectedTodo.linkedNoteId ? (
+                          <button
+                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] hover:bg-slate-50"
+                            onClick={() => openNoteFromTodo(selectedTodo.linkedNoteId as string)}
+                          >
+                            연결 노트 열기
+                          </button>
+                        ) : null}
+                      </div>
+                      <select
+                        value={selectedTodo.linkedNoteId ?? ""}
+                        onChange={(e) => patchTodo(selectedTodo.id, { linkedNoteId: e.target.value || null })}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      >
+                        <option value="">연결 없음</option>
+                        {noteSummaries.map((note) => (
+                          <option key={note.id} value={note.id}>
+                            {note.title || "제목 없는 노트"}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="text-[11px] text-slate-500">투두에서 연결된 노트를 바로 열 수 있습니다.</div>
                     </div>
 
                     <div className="space-y-2">
@@ -1564,6 +1908,38 @@ export default function App() {
         </div>
       </div>
       </div>
+      {isLocked ? (
+        <div className="fixed left-0 right-0 bottom-0 top-11 z-40 flex items-center justify-center bg-amber-200/90 backdrop-blur">
+          <div className="w-full max-w-sm rounded-2xl border border-amber-300 bg-amber-50 p-6 text-center shadow-2xl">
+            <div className="text-lg font-semibold text-amber-900">잠금 모드 상태입니다</div>
+            <div className="mt-2 text-sm text-amber-800">비밀번호를 입력해 잠금을 해제하세요.</div>
+            <input
+              type="password"
+              inputMode="numeric"
+              value={unlockPin}
+              maxLength={6}
+              onChange={(e) => {
+                const next = e.target.value.replace(/\D/g, "").slice(0, 6);
+                setUnlockPin(next);
+                setUnlockError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleUnlock();
+              }}
+              className="mt-4 w-full rounded-xl border border-amber-200 bg-white px-4 py-3 text-center text-xl tracking-[0.5em] text-amber-900"
+              placeholder="PIN"
+            />
+            {unlockError ? <div className="mt-2 text-xs text-rose-600">{unlockError}</div> : null}
+            <button
+              className="mt-4 w-full rounded-xl border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950"
+              onClick={() => void handleUnlock()}
+            >
+              잠금 해제
+            </button>
+            <div className="mt-2 text-[11px] text-amber-800">단축키: Ctrl + L</div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
