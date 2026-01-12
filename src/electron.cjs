@@ -1,13 +1,26 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, shell, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeTheme, shell, dialog, protocol } = require("electron");
 const path = require("path");
 const fs = require("fs-extra");
 
 // const isDev = !app.isPackaged;
 
 const ATTACH_DIR = () => path.join(app.getPath("userData"), "attachments");
+const ATTACHMENT_PROTOCOL = "note-attachment";
 
 const sqlite3 = require("sqlite3");
 sqlite3.verbose();
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: ATTACHMENT_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 const TODO_DB_FILE = () => path.join(app.getPath("userData"), "todos.db");
 
@@ -784,6 +797,17 @@ function createWindow() {
 
 app.whenReady().then(() => {
   initTodoStore();
+  protocol.registerFileProtocol(ATTACHMENT_PROTOCOL, (request, callback) => {
+    const url = request.url.slice(`${ATTACHMENT_PROTOCOL}://`.length);
+    const decodedPath = decodeURI(url);
+    const resolved = path.resolve(decodedPath);
+    const root = path.resolve(ATTACH_DIR());
+    if (!resolved.toLowerCase().startsWith(root.toLowerCase())) {
+      callback({ error: -10 });
+      return;
+    }
+    callback({ path: resolved });
+  });
   createWindow();
 
   app.on("activate", () => {

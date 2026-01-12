@@ -66,6 +66,12 @@
     @apply mb-0 mt-0 text-sm font-semibold text-slate-900;
   }
 
+  .markdown h1,
+  .markdown h2,
+  .markdown h3 {
+    font-family: var(--font-sans);
+  }
+
   .markdown p {
     @apply leading-6 text-slate-700;
   }
@@ -158,17 +164,36 @@
     @apply mb-0 mt-0 text-lg font-semibold text-slate-900;
   }
 
+  .tiptap h1,
+  .tiptap h2,
+  .tiptap h3 {
+    font-family: var(--font-sans);
+  }
+
   .tiptap p {
     @apply leading-6 text-slate-700;
   }
 
+  .tiptap ul {
+    @apply list-disc pl-5 text-slate-700;
+  }
+
+  .tiptap ol {
+    @apply list-decimal pl-5 text-slate-700;
+  }
+
   .tiptap ul,
   .tiptap ol {
-    @apply my-0 pl-5 text-slate-700;
+    @apply my-0;
   }
 
   .tiptap li {
     @apply mt-0.5;
+  }
+
+  .tiptap li > ul,
+  .tiptap li > ol {
+    @apply mt-1;
   }
 
   .tiptap a {

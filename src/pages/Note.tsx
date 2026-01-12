@@ -93,12 +93,39 @@ const nowIso = () => new Date().toISOString();
 const formatDateTime = (iso: string) => (iso ? iso.replace("T", " ").slice(0, 16) : "");
 const DRAG_MIME = "application/x-note-item";
 const ROOT_DROP_ID = "__root__";
+const ATTACHMENT_PROTOCOL = "note-attachment";
 
-function toFileUrl(filePath: string) {
+function toAttachmentUrl(filePath: string) {
   if (!filePath) return "";
   const normalized = filePath.replace(/\\/g, "/");
-  const fileUrl = normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
-  return encodeURI(fileUrl);
+  return `${ATTACHMENT_PROTOCOL}://${encodeURI(normalized)}`;
+}
+
+function fromFileUrl(fileUrl: string) {
+  if (!fileUrl.startsWith("file://")) return fileUrl;
+  const withoutScheme = decodeURI(fileUrl.replace(/^file:\/\//, ""));
+  const withoutLeading = withoutScheme.replace(/^\/+/, "");
+  if (/^[A-Za-z]:/.test(withoutLeading)) return withoutLeading;
+  return withoutScheme;
+}
+
+function normalizeImageSrc(src: string) {
+  if (!src) return src;
+  if (src.startsWith(`${ATTACHMENT_PROTOCOL}://`)) return src;
+  if (src.startsWith("file://")) return toAttachmentUrl(fromFileUrl(src));
+  return src;
+}
+
+function normalizeDocImages(node: JSONContent): JSONContent {
+  if (!node || typeof node !== "object") return node;
+  const next: JSONContent = { ...node };
+  if (node.type === "image" && node.attrs?.src) {
+    next.attrs = { ...node.attrs, src: normalizeImageSrc(String(node.attrs.src)) };
+  }
+  if (Array.isArray(node.content)) {
+    next.content = node.content.map((child) => normalizeDocImages(child as JSONContent));
+  }
+  return next;
 }
 
 function formatFileSize(size: number) {
@@ -203,22 +230,101 @@ function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
   const label = String(node.attrs.label ?? "상태");
   const options = normalizeSelectOptions(node.attrs.options);
   const value = String(node.attrs.value ?? options[0] ?? "");
+  const optionsText = options.join("\n");
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftLabel, setDraftLabel] = useState(label);
+  const [draftOptions, setDraftOptions] = useState(optionsText);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setDraftLabel(label);
+    setDraftOptions(optionsText);
+    setError("");
+  }, [label, optionsText]);
+
+  const handleApply = () => {
+    const cleaned = draftOptions
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .filter((item, index, list) => list.indexOf(item) === index);
+    if (cleaned.length === 0) {
+      setError("옵션을 최소 1개 입력하세요.");
+      return;
+    }
+    const nextLabel = draftLabel.trim() || "상태";
+    const nextValue = cleaned.includes(value) ? value : cleaned[0];
+    updateAttributes({
+      label: nextLabel,
+      options: cleaned,
+      value: nextValue,
+    });
+    setIsEditing(false);
+    setError("");
+  };
 
   return (
     <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
-      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-      <select
-        value={value}
-        disabled={!editor.isEditable}
-        onChange={(event) => updateAttributes({ value: event.target.value })}
-        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-      >
-        {options.map((opt) => (
-          <option key={opt} value={opt}>
-            {opt}
-          </option>
-        ))}
-      </select>
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <input
+            value={draftLabel}
+            onChange={(event) => setDraftLabel(event.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="라벨"
+          />
+          <textarea
+            value={draftOptions}
+            onChange={(event) => setDraftOptions(event.target.value)}
+            className="h-28 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+            placeholder="옵션을 줄바꿈으로 입력하세요."
+          />
+          {error ? <div className="text-xs text-rose-600">{error}</div> : null}
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={handleApply}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftLabel(label);
+                setDraftOptions(optionsText);
+                setError("");
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <select
+          value={value}
+          disabled={!editor.isEditable}
+          onChange={(event) => updateAttributes({ value: event.target.value })}
+          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+        >
+          {options.map((opt) => (
+            <option key={opt} value={opt}>
+              {opt}
+            </option>
+          ))}
+        </select>
+      )}
     </NodeViewWrapper>
   );
 }
@@ -380,6 +486,162 @@ const ChartBlock = Node.create({
   },
 });
 
+const CALLOUT_TONES: Record<
+  string,
+  { label: string; containerClass: string; badgeClass: string; bodyClass: string }
+> = {
+  note: {
+    label: "노트",
+    containerClass: "border-slate-200 bg-slate-50",
+    badgeClass: "bg-slate-200 text-slate-700",
+    bodyClass: "text-slate-700",
+  },
+  info: {
+    label: "정보",
+    containerClass: "border-sky-200 bg-sky-50",
+    badgeClass: "bg-sky-200 text-sky-700",
+    bodyClass: "text-sky-800",
+  },
+  success: {
+    label: "완료",
+    containerClass: "border-emerald-200 bg-emerald-50",
+    badgeClass: "bg-emerald-200 text-emerald-700",
+    bodyClass: "text-emerald-800",
+  },
+  warning: {
+    label: "주의",
+    containerClass: "border-amber-200 bg-amber-50",
+    badgeClass: "bg-amber-200 text-amber-700",
+    bodyClass: "text-amber-900",
+  },
+};
+
+function CalloutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const tone = String(node.attrs.tone ?? "note");
+  const title = String(node.attrs.title ?? "콜아웃");
+  const body = String(node.attrs.body ?? "");
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftTone, setDraftTone] = useState(tone);
+  const [draftTitle, setDraftTitle] = useState(title);
+  const [draftBody, setDraftBody] = useState(body);
+  const activeTone = isEditing ? draftTone : tone;
+  const toneMeta = CALLOUT_TONES[activeTone] ?? CALLOUT_TONES.note;
+
+  useEffect(() => {
+    setDraftTone(tone);
+    setDraftTitle(title);
+    setDraftBody(body);
+  }, [tone, title, body]);
+
+  const handleApply = () => {
+    updateAttributes({
+      tone: draftTone,
+      title: draftTitle.trim() || "콜아웃",
+      body: draftBody.trim(),
+    });
+    setIsEditing(false);
+  };
+
+  return (
+    <NodeViewWrapper
+      className={`rounded-2xl border p-3 ${toneMeta.containerClass}`}
+      contentEditable={false}
+    >
+      <div className="flex items-center justify-between">
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${toneMeta.badgeClass}`}>
+          {toneMeta.label}
+        </span>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <select
+            value={draftTone}
+            onChange={(event) => setDraftTone(event.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+          >
+            {Object.entries(CALLOUT_TONES).map(([key, meta]) => (
+              <option key={key} value={key}>
+                {meta.label}
+              </option>
+            ))}
+          </select>
+          <input
+            value={draftTitle}
+            onChange={(event) => setDraftTitle(event.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="제목"
+          />
+          <textarea
+            value={draftBody}
+            onChange={(event) => setDraftBody(event.target.value)}
+            className="h-24 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+            placeholder="내용"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={handleApply}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftTone(tone);
+                setDraftTitle(title);
+                setDraftBody(body);
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1">
+          <div className="text-sm font-semibold text-slate-900">{title}</div>
+          {body ? (
+            <p className={`whitespace-pre-line text-sm ${toneMeta.bodyClass}`}>{body}</p>
+          ) : (
+            <div className="text-xs text-slate-400">내용이 없습니다.</div>
+          )}
+        </div>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const CalloutBlock = Node.create({
+  name: "calloutBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      tone: { default: "note" },
+      title: { default: "콜아웃" },
+      body: { default: "핵심 내용을 정리하세요." },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-callout-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-callout-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(CalloutBlockView);
+  },
+});
+
 export default function Note({
   focusNoteId,
   onFocusHandled,
@@ -468,6 +730,7 @@ export default function Note({
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       SelectBlock,
       ChartBlock,
+      CalloutBlock,
     ],
     []
   );
@@ -497,7 +760,7 @@ export default function Note({
         return { ...prev, attachments: [...prev.attachments, attachment] };
       });
       if (attachment.kind === "image") {
-        editor.chain().focus().setImage({ src: toFileUrl(attachment.path), alt: attachment.name }).run();
+        editor.chain().focus().setImage({ src: toAttachmentUrl(attachment.path), alt: attachment.name }).run();
       }
     }
     return true;
@@ -545,7 +808,7 @@ export default function Note({
       selectedNote?.contentTiptap
         ? parseContentTiptap(selectedNote.contentTiptap) ?? EMPTY_DOC
         : toDocFromText(selectedNote?.content ?? "");
-    editor.commands.setContent(nextContent, {emitUpdate: false});    
+    editor.commands.setContent(normalizeDocImages(nextContent), { emitUpdate: false });
   }, [editor, selectedNote?.id]);
 
   useEffect(() => {
@@ -763,7 +1026,7 @@ export default function Note({
       selectedNote?.contentTiptap
         ? parseContentTiptap(selectedNote.contentTiptap) ?? EMPTY_DOC
         : toDocFromText(selectedNote?.content ?? "");
-    editor.commands.setContent(nextContent, {emitUpdate: false});    
+    editor.commands.setContent(normalizeDocImages(nextContent), { emitUpdate: false });
   };
 
   const handleSaveEdit = async () => {
@@ -900,7 +1163,7 @@ export default function Note({
         return { ...prev, attachments: [...prev.attachments, attachment] };
       });
       if (attachment.kind === "image" && editor && isEditingRef.current) {
-        editor.chain().focus().setImage({ src: toFileUrl(attachment.path), alt: attachment.name }).run();
+        editor.chain().focus().setImage({ src: toAttachmentUrl(attachment.path), alt: attachment.name }).run();
       }
     }
     if (didAttach) {
@@ -1001,6 +1264,10 @@ export default function Note({
         action: () => editor.chain().focus().toggleCodeBlock().run(),
       },
       {
+        label: "Divider",
+        action: () => editor.chain().focus().setHorizontalRule().run(),
+      },
+      {
         label: "Blockquote",
         action: () => editor.chain().focus().toggleBlockquote().run(),
       },
@@ -1011,6 +1278,10 @@ export default function Note({
       {
         label: "Chart Block",
         action: () => editor.chain().focus().insertContent({ type: "chartBlock" }).run(),
+      },
+      {
+        label: "Callout Block",
+        action: () => editor.chain().focus().insertContent({ type: "calloutBlock" }).run(),
       },
     ]
     : [];
@@ -1332,6 +1603,12 @@ export default function Note({
                         <button className={toolbarButtonClass(editor.isActive("link"))} onClick={handleSetLink}>
                           링크
                         </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().unsetAllMarks().clearNodes().run()}
+                        >
+                          초기화
+                        </button>
                       </div>
                       <div className={toolbarGroupClass}>
                         <span className={toolbarLabelClass}>헤딩</span>
@@ -1391,6 +1668,12 @@ export default function Note({
                           onClick={() => editor.chain().focus().toggleCodeBlock().run()}
                         >
                           코드
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().setHorizontalRule().run()}
+                        >
+                          구분선
                         </button>
                       </div>
                       <div className={toolbarGroupClass}>
@@ -1462,6 +1745,12 @@ export default function Note({
                           onClick={() => editor.chain().focus().insertContent({ type: "chartBlock" }).run()}
                         >
                           Chart
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "calloutBlock" }).run()}
+                        >
+                          Callout
                         </button>
                       </div>
                     </div>
@@ -1582,7 +1871,11 @@ export default function Note({
                         <div className="grid grid-cols-1 gap-2">
                           {imageAttachments.map((att) => (
                             <div key={att.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                              <img src={toFileUrl(att.path)} alt={att.name} className="h-28 w-full object-cover" />
+                              <img
+                                src={toAttachmentUrl(att.path)}
+                                alt={att.name}
+                                className="h-28 w-full object-cover"
+                              />
                               <div className="flex items-center justify-between gap-2 p-2 text-[11px]">
                                 <div className="min-w-0">
                                   <div className="truncate font-medium text-slate-700">{att.name}</div>
