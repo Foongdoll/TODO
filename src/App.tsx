@@ -50,10 +50,12 @@ import Calendar, { addMonths, startOfMonth, type TodoSummary } from "./pages/Cal
 import Note from "./pages/Note";
 import Chat from "./pages/Chat";
 import SettingPanel from "./pages/SettingPanel";
+import { AuthProvider } from "./context/auth";
+import { ChatSocketProvider } from "./context/chatSocket";
 
 export type TodoStatus = "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
 export type TabKey = "LIST" | "CALENDAR" | "CHAT" | "SETTINGS" | "NOTE" | "LOGIN";
-
+(window as any).global = window
 type TodoRel = { toId: string; type: "blocks" | "relates" | "depends" };
 type LegacyImage = { id: string; name: string; dataUrl: string; createdAt: string; path?: string };
 type TodoAttachment = {
@@ -216,7 +218,7 @@ const LOCK_STORAGE_KEY = "todoongs.locked";
 const LOCK_ENABLED_STORAGE_KEY = "todoongs.lockEnabled";
 const LOCK_HASH_STORAGE_KEY = "todoongs.lockHash";
 const LOCK_SALT_STORAGE_KEY = "todoongs.lockSalt";
-const clampOpacity = (value: number) => Math.min(1, Math.max(0.6, value));
+const clampOpacity = (value: number) => Math.min(1, Math.max(0.2, value));
 const toHex = (buffer: ArrayBuffer) =>
   Array.from(new Uint8Array(buffer))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -1169,7 +1171,9 @@ export default function App() {
   };
 
   return (
-    <div className="relative flex h-screen flex-col overflow-hidden bg-gradient-to-b from-amber-50 via-white to-slate-50 text-slate-900">
+    <AuthProvider>
+      <ChatSocketProvider>
+      <div className="relative flex h-screen flex-col overflow-hidden bg-gradient-to-b from-amber-50 via-white to-slate-50 text-slate-900">
       <div className="pointer-events-none absolute inset-0 -z-10">
         <div className="absolute -left-24 top-10 h-64 w-64 rounded-full bg-rose-200/40 blur-3xl" />
         <div className="absolute right-0 top-32 h-72 w-72 rounded-full bg-amber-200/50 blur-3xl" />
@@ -1940,6 +1944,8 @@ export default function App() {
           </div>
         </div>
       ) : null}
-    </div>
+      </div>
+    </ChatSocketProvider>
+    </AuthProvider>
   );
 }

@@ -7,6 +7,18 @@ const fs = require("fs-extra");
 const ATTACH_DIR = () => path.join(app.getPath("userData"), "attachments");
 const ATTACHMENT_PROTOCOL = "note-attachment";
 
+function resolveAttachmentRequestPath(requestUrl) {
+  const rawUrl = requestUrl.slice(`${ATTACHMENT_PROTOCOL}://`.length);
+  let decoded = decodeURI(rawUrl);
+
+  // normalize leading slashes and ensure drive colon exists
+  decoded = decoded.replace(/^\/+/, "");
+  if (/^[A-Za-z](?=\/)/.test(decoded)) {
+    decoded = `${decoded[0]}:${decoded.slice(1)}`;
+  }
+  return path.resolve(decoded);
+}
+
 const sqlite3 = require("sqlite3");
 sqlite3.verbose();
 
@@ -797,12 +809,18 @@ function createWindow() {
 
 app.whenReady().then(() => {
   initTodoStore();
+  const root = path.resolve(ATTACH_DIR());
+  const rootLower = root.toLowerCase();
   protocol.registerFileProtocol(ATTACHMENT_PROTOCOL, (request, callback) => {
-    const url = request.url.slice(`${ATTACHMENT_PROTOCOL}://`.length);
-    const decodedPath = decodeURI(url);
-    const resolved = path.resolve(decodedPath);
-    const root = path.resolve(ATTACH_DIR());
-    if (!resolved.toLowerCase().startsWith(root.toLowerCase())) {
+    let resolved;
+    try {
+      resolved = resolveAttachmentRequestPath(request.url);
+    } catch (error) {
+      console.error("Unable to resolve attachment path", error);
+      callback({ error: -2 });
+      return;
+    }
+    if (!resolved.toLowerCase().startsWith(rootLower)) {
       callback({ error: -10 });
       return;
     }

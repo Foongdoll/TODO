@@ -182,6 +182,17 @@ const normalizeChartData = (value: unknown): ChartDatum[] => {
     .filter((item) => item.label);
 };
 
+const DEFAULT_LAYOUT_ITEMS = ["Block A", "Block B", "Block C", "Block D"];
+const LAYOUT_OPTIONS = [
+  { value: "grid", label: "Grid" },
+  { value: "list", label: "List" },
+  { value: "table", label: "Table" },
+  { value: "venn", label: "Venn" },
+];
+
+const normalizeLayoutItems = (value: unknown) =>
+  Array.isArray(value) ? value.map((item) => String(item)) : DEFAULT_LAYOUT_ITEMS;
+
 const toDocFromText = (text: string): JSONContent => {
   if (!text) return EMPTY_DOC;
   const lines = text.split(/\r?\n/);
@@ -222,9 +233,105 @@ const isPlainDoc = (doc?: JSONContent | null) => {
 };
 
 const MARKDOWN_PATTERN =
-  /(^\s{0,3}#{1,6}\s)|(\*\*[^*]+\*\*)|(__[^_]+__)|(`{1,3}[^`]+`{1,3})|(^\s*[-*+]\s+)|(^\s*\d+\.\s+)|(\[[^\]]+\]\([^)]+\))|(\|.+\|)/m;
+  /(^\s{0,3}#{1,6}\s)|(\*\*[^*]+\*\*)|(__[^_]+__)|(`{1,3}[^`]+`{1,3})|(^\s*[-*+]\s+)|(^\s*\d+\.\s+)|(\[[^\]]+\]\([^)]+\))|(\|.+\|)|(\[(?:v|x)\])|(~[^~]+~)/mi;
 
 const hasMarkdownSyntax = (value: string) => MARKDOWN_PATTERN.test(value);
+
+type MdastNode = {
+  type: string;
+  value?: string;
+  children?: MdastNode[];
+  data?: {
+    hName?: string;
+    hProperties?: Record<string, unknown>;
+    hChildren?: MdastNode[];
+  };
+};
+
+const createCheckboxNode = (checked: boolean): MdastNode => ({
+  type: "inlineCheckbox",
+  data: {
+    hName: "input",
+    hProperties: {
+      type: "checkbox",
+      checked,
+      disabled: true,
+      "aria-label": checked ? "checked" : "unchecked",
+    },
+  },
+});
+
+const splitInlineTokens = (value: string): MdastNode[] => {
+  const nodes: MdastNode[] = [];
+  let buffer = "";
+  const flush = () => {
+    if (buffer) {
+      nodes.push({ type: "text", value: buffer });
+      buffer = "";
+    }
+  };
+
+  let i = 0;
+  while (i < value.length) {
+    const char = value[i];
+    if (char === "[" && value[i + 2] === "]") {
+      const flag = value[i + 1]?.toLowerCase();
+      if (flag === "v" || flag === "x") {
+        flush();
+        nodes.push(createCheckboxNode(flag === "v"));
+        i += 3;
+        continue;
+      }
+    }
+    if (char === "~" && value[i - 1] !== "~" && value[i + 1] !== "~") {
+      const end = value.indexOf("~", i + 1);
+      if (end !== -1 && value[end + 1] !== "~") {
+        const text = value.slice(i + 1, end);
+        if (text) {
+          flush();
+          nodes.push({ type: "delete", children: [{ type: "text", value: text }] });
+          i = end + 1;
+          continue;
+        }
+      }
+    }
+    buffer += char;
+    i += 1;
+  }
+  flush();
+  return nodes;
+};
+
+const remarkInlineTokens = () => {
+  const walk = (node: MdastNode) => {
+    if (!node || !Array.isArray(node.children)) return;
+    const nextChildren: MdastNode[] = [];
+    for (const child of node.children) {
+      if (
+        child.type === "text" &&
+        typeof child.value === "string" &&
+        node.type !== "code" &&
+        node.type !== "inlineCode"
+      ) {
+        nextChildren.push(...splitInlineTokens(child.value));
+        continue;
+      }
+      walk(child);
+      nextChildren.push(child);
+    }
+    node.children = nextChildren;
+  };
+
+  return (tree: MdastNode) => {
+    walk(tree);
+  };
+};
+
+const stopInteractiveEvent = (event: any) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest("button, input, select, textarea"));
+};
 
 function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
   const label = String(node.attrs.label ?? "상태");
@@ -267,14 +374,12 @@ function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
     <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
       <div className="flex items-center justify-between">
         <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-        {editor.isEditable ? (
-          <button
-            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
-            onClick={() => setIsEditing((prev) => !prev)}
-          >
-            {isEditing ? "닫기" : "편집"}
-          </button>
-        ) : null}
+        <button
+          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+          onClick={() => setIsEditing((prev) => !prev)}
+        >
+          {isEditing ? "닫기" : "편집"}
+        </button>
       </div>
       {isEditing ? (
         <div className="mt-3 space-y-2">
@@ -314,7 +419,6 @@ function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
       ) : (
         <select
           value={value}
-          disabled={!editor.isEditable}
           onChange={(event) => updateAttributes({ value: event.target.value })}
           className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
         >
@@ -348,7 +452,7 @@ const SelectBlock = Node.create({
     return ["div", mergeAttributes(HTMLAttributes, { "data-select-block": "true" })];
   },
   addNodeView() {
-    return ReactNodeViewRenderer(SelectBlockView);
+    return ReactNodeViewRenderer(SelectBlockView, { stopEvent: stopInteractiveEvent });
   },
 });
 
@@ -482,7 +586,7 @@ const ChartBlock = Node.create({
     return ["div", mergeAttributes(HTMLAttributes, { "data-chart-block": "true" })];
   },
   addNodeView() {
-    return ReactNodeViewRenderer(ChartBlockView);
+    return ReactNodeViewRenderer(ChartBlockView, { stopEvent: stopInteractiveEvent });
   },
 });
 
@@ -638,7 +742,191 @@ const CalloutBlock = Node.create({
     return ["div", mergeAttributes(HTMLAttributes, { "data-callout-block": "true" })];
   },
   addNodeView() {
-    return ReactNodeViewRenderer(CalloutBlockView);
+    return ReactNodeViewRenderer(CalloutBlockView, { stopEvent: stopInteractiveEvent });
+  },
+});
+
+function LayoutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const layout = String(node.attrs.layout ?? "grid");
+  const items = normalizeLayoutItems(node.attrs.items);
+  const itemsText = items.join("\n");
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftLayout, setDraftLayout] = useState(layout);
+  const [draftItems, setDraftItems] = useState(itemsText);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setDraftLayout(layout);
+    setDraftItems(itemsText);
+    setError("");
+  }, [layout, itemsText]);
+
+  const handleApply = () => {
+    const cleaned = draftItems
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .filter((item, index, list) => list.indexOf(item) === index);
+    if (cleaned.length === 0) {
+      setError("아이템을 최소 1개 입력하세요.");
+      return;
+    }
+    updateAttributes({
+      layout: draftLayout,
+      items: cleaned,
+    });
+    setIsEditing(false);
+    setError("");
+  };
+
+  const activeLayout = LAYOUT_OPTIONS.some((option) => option.value === layout) ? layout : "grid";
+  const previewItems = items.length ? items : DEFAULT_LAYOUT_ITEMS;
+
+  const renderPreview = () => {
+    if (activeLayout === "list") {
+      return (
+        <ul className="list-disc pl-5 text-xs text-slate-700">
+          {previewItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      );
+    }
+    if (activeLayout === "table") {
+      const rows: Array<[string, string | undefined]> = [];
+      for (let i = 0; i < previewItems.length; i += 2) {
+        rows.push([previewItems[i], previewItems[i + 1]]);
+      }
+      return (
+        <table className="w-full border-collapse text-xs">
+          <tbody>
+            {rows.map((row, idx) => (
+              <tr key={`row-${idx}`}>
+                <td className="border border-slate-200 px-2 py-1">{row[0]}</td>
+                <td className="border border-slate-200 px-2 py-1">{row[1] ?? ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      );
+    }
+    if (activeLayout === "venn") {
+      const leftLabel = previewItems[0] ?? "A";
+      const rightLabel = previewItems[1] ?? "B";
+      const overlapLabel = previewItems[2] ?? "A&B";
+      return (
+        <div className="relative h-32">
+          <div className="absolute left-2 top-2 flex h-24 w-24 items-center justify-center rounded-full border border-slate-300 bg-amber-100/70 text-[10px] text-slate-700">
+            <span className="px-2 text-center">{leftLabel}</span>
+          </div>
+          <div className="absolute right-2 top-2 flex h-24 w-24 items-center justify-center rounded-full border border-slate-300 bg-sky-100/70 text-[10px] text-slate-700">
+            <span className="px-2 text-center">{rightLabel}</span>
+          </div>
+          <div className="absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-slate-700">
+            {overlapLabel}
+          </div>
+        </div>
+      );
+    }
+    const gridCols = previewItems.length >= 6 ? "grid-cols-3" : "grid-cols-2";
+    return (
+      <div className={`grid gap-2 ${gridCols}`}>
+        {previewItems.map((item) => (
+          <div
+            key={item}
+            className="rounded-xl border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+          >
+            {item}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Layout</div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <select
+            value={draftLayout}
+            onChange={(event) => setDraftLayout(event.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+          >
+            {LAYOUT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <textarea
+            value={draftItems}
+            onChange={(event) => setDraftItems(event.target.value)}
+            className="h-24 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+            placeholder="아이템을 줄바꿈으로 입력하세요."
+          />
+          {error ? <div className="text-xs text-rose-600">{error}</div> : null}
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={handleApply}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftLayout(layout);
+                setDraftItems(itemsText);
+                setError("");
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <div className="text-sm font-semibold text-slate-800">
+            {LAYOUT_OPTIONS.find((option) => option.value === activeLayout)?.label ?? "Grid"}
+          </div>
+          {renderPreview()}
+        </div>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const LayoutBlock = Node.create({
+  name: "layoutBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      layout: { default: "grid" },
+      items: { default: DEFAULT_LAYOUT_ITEMS },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-layout-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-layout-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(LayoutBlockView, { stopEvent: stopInteractiveEvent });
   },
 });
 
@@ -731,6 +1019,7 @@ export default function Note({
       SelectBlock,
       ChartBlock,
       CalloutBlock,
+      LayoutBlock,
     ],
     []
   );
@@ -744,8 +1033,8 @@ export default function Note({
   const handleEditorImageFiles = useCallback(async (files: File[]) => {
     if (!editor || !isEditingRef.current) return false;
     const note = selectedNoteRef.current;
-    if (!note || !hasNotesBridge) return false;
-    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (!note || !hasNotesBridge) return false;    
+    const images = files.filter((file) => file.type.startsWith("image/"));    
     if (images.length === 0) return false;
     for (const file of images) {
       const dataUrl = await fileToDataUrl(file);
@@ -941,7 +1230,7 @@ export default function Note({
       setSelectedNote(null);
       return;
     }
-    window.api.notes.get(selectedNoteId).then((detail) => {
+    window.api.notes.get(selectedNoteId).then((detail) => {      
       if (!detail) {
         setSelectedNote(null);
         return;
@@ -1282,6 +1571,10 @@ export default function Note({
       {
         label: "Callout Block",
         action: () => editor.chain().focus().insertContent({ type: "calloutBlock" }).run(),
+      },
+      {
+        label: "Layout Block",
+        action: () => editor.chain().focus().insertContent({ type: "layoutBlock" }).run(),
       },
     ]
     : [];
@@ -1752,6 +2045,12 @@ export default function Note({
                         >
                           Callout
                         </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "layoutBlock" }).run()}
+                        >
+                          Layout
+                        </button>
                       </div>
                     </div>
                   ) : null}
@@ -1760,7 +2059,9 @@ export default function Note({
                     shouldRenderMarkdown ? (
                       <div className={`${editorBodyClass} markdown`}>
                         {markdownSource.trim() ? (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdownSource}</ReactMarkdown>
+                          <ReactMarkdown remarkPlugins={[remarkGfm, remarkInlineTokens]}>
+                            {markdownSource}
+                          </ReactMarkdown>
                         ) : (
                           <div className="text-sm text-slate-400">내용이 없습니다.</div>
                         )}
@@ -1774,7 +2075,7 @@ export default function Note({
 
                   {editor ? (
                     <FloatingMenu
-                      editor={editor}                      
+                      editor={editor}
                       options={{ placement: "bottom-start" }}
                       shouldShow={({ editor: menuEditor }) => {
                         if (!isEditingRef.current) return false;
