@@ -37,10 +37,6 @@ function dayLabel(date: Date) {
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 const toYMD = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const nowIso = () => new Date().toISOString();
-const uid = () =>
-  globalThis.crypto?.randomUUID?.() ?? `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-
 
 export default function Calendar({
   month,

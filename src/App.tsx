@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -50,8 +50,9 @@ import Calendar, { addMonths, startOfMonth, type TodoSummary } from "./pages/Cal
 import Note from "./pages/Note";
 import Chat from "./pages/Chat";
 import SettingPanel from "./pages/SettingPanel";
-import { AuthProvider } from "./context/auth";
-import { ChatSocketProvider } from "./context/chatSocket";
+import type { ChatNotificationEvent } from "./api/chat";
+import { AuthProvider, useAuth } from "./context/auth";
+import { ChatSocketProvider, useChatSocket } from "./context/chatSocket";
 
 export type TodoStatus = "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
 export type TabKey = "LIST" | "CALENDAR" | "CHAT" | "SETTINGS" | "NOTE" | "LOGIN";
@@ -158,6 +159,31 @@ const UPLOAD_EXTENSIONS = ["pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "
 const SUPPORTED_UPLOAD_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...UPLOAD_EXTENSIONS]);
 const UPLOAD_ACCEPT = ["image/*", ...UPLOAD_EXTENSIONS.map((ext) => `.${ext}`)].join(",");
 const REF_PAGE_SIZE = 24;
+function ChatBackgroundNotifications({ enabled }: { enabled: boolean }) {
+  const { user } = useAuth();
+  const { subscribe } = useChatSocket();
+
+  const notify = useCallback((title: string, options: NotificationOptions) => {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission !== "granted") return;
+    new Notification(title, options);
+  }, []);
+
+  useEffect(() => {
+    if (!enabled || !user) return;
+    return subscribe(`/topic/notifications/${user.userId}`, (payload: ChatNotificationEvent) => {
+      notify("새로운 채팅 알림", {        
+        body: `${payload.senderName}: ${payload.preview}`,
+        icon: logo,
+        silent: true,
+        tag: payload.senderName
+      });
+    });
+  }, [enabled, notify, subscribe, user]);
+
+  return null;
+}
+
 
 function getFileExt(name: string) {
   const idx = name.lastIndexOf(".");
@@ -1170,9 +1196,12 @@ export default function App() {
     window.setTimeout(() => setStorageNotice(""), 2200);
   };
 
+  const isChatTab = tab === "CHAT";
+
   return (
     <AuthProvider>
       <ChatSocketProvider>
+      <ChatBackgroundNotifications enabled={tab !== "CHAT"} />
       <div className="relative flex h-screen flex-col overflow-hidden bg-gradient-to-b from-amber-50 via-white to-slate-50 text-slate-900">
       <div className="pointer-events-none absolute inset-0 -z-10">
         <div className="absolute -left-24 top-10 h-64 w-64 rounded-full bg-rose-200/40 blur-3xl" />
@@ -1182,7 +1211,7 @@ export default function App() {
 
       <TitleBar />
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className={cn("flex-1", isChatTab ? "flex min-h-0 flex-col overflow-hidden" : "min-h-[580px] overflow-y-auto")}>
       <div className="sticky top-0 z-10 border-b border-slate-200/70 bg-white/70 backdrop-blur">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="flex items-center gap-3">
@@ -1275,8 +1304,13 @@ export default function App() {
         ) : null}
       </div>
 
-      <div className="mx-auto grid max-w-6xl grid-cols-1 gap-6 px-4 pb-10 pt-6">
-        <div className="space-y-6">
+      <div
+        className={cn(
+          "mx-auto max-w-6xl px-4 pt-6",
+          isChatTab ? "flex min-h-0 flex-1 flex-col pb-6" : "grid grid-cols-1 gap-6 pb-10"
+        )}
+      >
+        <div className={cn(isChatTab ? "flex min-h-0 flex-1 flex-col max-w-6xl" : "space-y-6")}>
           {tab === "LIST" && (
             <div className="rounded-2xl border border-slate-200/70 bg-white/80 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/70 px-4 py-3">
@@ -1413,7 +1447,9 @@ export default function App() {
           )}
 
           {tab === "CHAT" && (
-            <Chat />
+            <div className="flex min-h-0 flex-1 flex-col">
+              <Chat />
+            </div>
           )}
           {tab === "SETTINGS" && (
             <SettingPanel

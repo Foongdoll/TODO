@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, nativeTheme, shell, dialog, protocol } = re
 const path = require("path");
 const fs = require("fs-extra");
 
-// const isDev = !app.isPackaged;
+const isDev = !app.isPackaged;
 
 const ATTACH_DIR = () => path.join(app.getPath("userData"), "attachments");
 const ATTACHMENT_PROTOCOL = "note-attachment";
@@ -11,7 +11,7 @@ function resolveAttachmentRequestPath(requestUrl) {
   const rawUrl = requestUrl.slice(`${ATTACHMENT_PROTOCOL}://`.length);
   let decoded = decodeURI(rawUrl);
 
-  // normalize leading slashes and ensure drive colon exists
+
   decoded = decoded.replace(/^\/+/, "");
   if (/^[A-Za-z](?=\/)/.test(decoded)) {
     decoded = `${decoded[0]}:${decoded.slice(1)}`;
@@ -792,12 +792,11 @@ function createWindow() {
   win.once("ready-to-show", () => win && win.show());
 
   // renderer 로드
-  // if (isDev) {
-  win.loadURL("http://localhost:5173");
-
-  // } else {
-  // win.loadFile(resolveRendererPath());
-  // }
+  if (isDev) {
+    win.loadURL("http://localhost:5173");
+  } else {
+    win.loadFile(resolveRendererPath());
+  }
 
   // maximize 상태 변경을 renderer에 push
   const pushMaxState = () => {

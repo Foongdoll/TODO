@@ -333,7 +333,7 @@ const stopInteractiveEvent = (event: any) => {
   return Boolean(target.closest("button, input, select, textarea"));
 };
 
-function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+function SelectBlockView({ node, updateAttributes }: NodeViewProps) {
   const label = String(node.attrs.label ?? "상태");
   const options = normalizeSelectOptions(node.attrs.options);
   const value = String(node.attrs.value ?? options[0] ?? "");
@@ -955,6 +955,8 @@ export default function Note({
   const [isEditing, setIsEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
+  const [linkPromptOpen, setLinkPromptOpen] = useState(false);
+  const [linkDraft, setLinkDraft] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedNoteRef = useRef<NoteDetail | null>(null);
@@ -1033,8 +1035,8 @@ export default function Note({
   const handleEditorImageFiles = useCallback(async (files: File[]) => {
     if (!editor || !isEditingRef.current) return false;
     const note = selectedNoteRef.current;
-    if (!note || !hasNotesBridge) return false;    
-    const images = files.filter((file) => file.type.startsWith("image/"));    
+    if (!note || !hasNotesBridge) return false;
+    const images = files.filter((file) => file.type.startsWith("image/"));
     if (images.length === 0) return false;
     for (const file of images) {
       const dataUrl = await fileToDataUrl(file);
@@ -1093,12 +1095,17 @@ export default function Note({
 
   useEffect(() => {
     if (!editor) return;
+
     const nextContent =
       selectedNote?.contentTiptap
         ? parseContentTiptap(selectedNote.contentTiptap) ?? EMPTY_DOC
         : toDocFromText(selectedNote?.content ?? "");
-    editor.commands.setContent(normalizeDocImages(nextContent), { emitUpdate: false });
+
+    queueMicrotask(() => {
+      editor.commands.setContent(normalizeDocImages(nextContent), { emitUpdate: false });
+    });
   }, [editor, selectedNote?.id]);
+
 
   useEffect(() => {
     if (!selectedNote) return;
@@ -1230,7 +1237,7 @@ export default function Note({
       setSelectedNote(null);
       return;
     }
-    window.api.notes.get(selectedNoteId).then((detail) => {      
+    window.api.notes.get(selectedNoteId).then((detail) => {
       if (!detail) {
         setSelectedNote(null);
         return;
@@ -1339,14 +1346,25 @@ export default function Note({
   const handleSetLink = () => {
     if (!editor || !isEditingRef.current) return;
     const previous = editor.getAttributes("link").href as string | undefined;
-    const url = window.prompt("링크 주소를 입력하세요.", previous ?? "");
-    if (url === null) return;
+    setLinkDraft(previous ?? "");
+    setLinkPromptOpen(true);
+  };
+
+  const handleConfirmLink = useCallback(() => {
+    if (!editor) return;
+    const url = linkDraft.trim();
     if (!url) {
       editor.chain().focus().unsetLink().run();
+      setLinkPromptOpen(false);
       return;
     }
     editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
-  };
+    setLinkPromptOpen(false);
+  }, [editor, linkDraft]);
+
+  const handleCancelLink = useCallback(() => {
+    setLinkPromptOpen(false);
+  }, []);
 
   const clearSlash = () => {
     if (!editor) return;
@@ -2050,6 +2068,46 @@ export default function Note({
                           onClick={() => editor.chain().focus().insertContent({ type: "layoutBlock" }).run()}
                         >
                           Layout
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {linkPromptOpen && canEdit ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600 shadow-sm">
+                      <div className="text-xs font-semibold text-slate-700">링크</div>
+                      <input
+                        className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700"
+                        placeholder="https://"
+                        value={linkDraft}
+                        onChange={(event) => setLinkDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            handleConfirmLink();
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            handleCancelLink();
+                          }
+                        }}
+                        autoFocus
+                      />
+                      <div className="mt-1 text-[11px] text-slate-400">비워두면 링크가 제거됩니다.</div>
+                      <div className="mt-3 flex justify-end gap-2">
+                        <button
+                          className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs hover:bg-slate-50"
+                          type="button"
+                          onClick={handleCancelLink}
+                        >
+                          취소
+                        </button>
+                        <button
+                          className="rounded-lg border border-slate-900 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+                          type="button"
+                          onClick={handleConfirmLink}
+                        >
+                          적용
                         </button>
                       </div>
                     </div>

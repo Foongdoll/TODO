@@ -2,8 +2,8 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Client, type IMessage, type StompSubscription } from "@stomp/stompjs";
 import SockJS from "sockjs-client";
 import { useAuth } from "./auth";
+import { API_BASE } from "../api/http";
 
-const API_BASE = "http://localhost:8080";
 const WS_ENDPOINT = `${API_BASE}/ws`;
 
 type SubscriptionEntry = {
@@ -50,6 +50,9 @@ export const ChatSocketProvider = ({ children }: { children: React.ReactNode }) 
       reconnectDelay: 5000,
       onConnect: () => {
         setConnected(true);
+
+        console.log("WebSocket connected");
+
         pendingRef.current.forEach((entry) => {
           const subscription = client.subscribe(entry.destination, (message: IMessage) => entry.handler(parseBody(message)));
           subscriptionsRef.current.set(entry.destination, subscription);

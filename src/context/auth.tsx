@@ -4,8 +4,11 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
+
+import { API_BASE } from "../api/http";
 
 type AuthStatus = "idle" | "loading" | "authenticated" | "error";
 
@@ -30,6 +33,7 @@ type SignUpCredentials = {
 
 type AuthResponsePayload = {
   accessToken: string;
+  refreshToken: string;
   email: string;
   name: string;
   provider: string;
@@ -37,49 +41,56 @@ type AuthResponsePayload = {
   notificationsEnabled: boolean;
 };
 
+type AuthStored = {
+  user: AuthUser;
+  token: string;
+  refreshToken: string;
+};
+
 const STORAGE_KEY = "todoongs.auth";
-const API_BASE = "http://localhost:8080"; //String(import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
-const AUTH_ENDPOINT = API_BASE ? `${API_BASE}/auth` : "/auth";
+const AUTH_ENDPOINT = `${API_BASE}/auth`;
 
 type AuthContextValue = {
   user: AuthUser | null;
   token: string | null;
+  refreshToken: string | null;
   status: AuthStatus;
   error: string | null;
   signIn: (credentials: LoginCredentials) => Promise<AuthUser>;
   signUp: (credentials: SignUpCredentials) => Promise<AuthUser>;
   logout: () => void;
+  refreshTokens: () => Promise<boolean>;
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-function storedAuth(): { user: AuthUser; token: string } | null {
+function storedAuth(): AuthStored | null {
   if (typeof window === "undefined") return null;
 
   try {
-    const value = window.localStorage.getItem(STORAGE_KEY);
-    if (!value) return null;
-
-    const parsed: unknown = JSON.parse(value);
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
     if (
       parsed &&
       typeof parsed === "object" &&
       "user" in parsed &&
-      "token" in parsed
+      "token" in parsed &&
+      "refreshToken" in parsed
     ) {
-      const obj = parsed as { user: AuthUser; token: string };
-      if (obj.user && obj.token) return obj;
+      const candidate = parsed as AuthStored;
+      if (candidate.user && candidate.token && candidate.refreshToken) {
+        return candidate;
+      }
     }
   } catch (error) {
-    console.error("todoongs: failed to parse stored auth", error);
+    console.error("todoongs: stored auth 해석 실패", error);
   }
-
   return null;
 }
 
-function persistAuth(payload: { user: AuthUser; token: string } | null) {
+function persistAuth(payload: AuthStored | null) {
   if (typeof window === "undefined") return;
-
   if (payload) {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } else {
@@ -87,7 +98,6 @@ function persistAuth(payload: { user: AuthUser; token: string } | null) {
   }
 }
 
-// ✅ TSX에서 제네릭 화살표 함수는 깨질 수 있어서 "function"으로 선언
 async function requestAuth<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${AUTH_ENDPOINT}${path}`, {
     method: "POST",
@@ -95,29 +105,13 @@ async function requestAuth<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
 
-  const text = await response.text();
-  let parsed: unknown = null;
-
-  if (text) {
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw new Error("서버 응답을 해석할 수 없습니다.");
-    }
-  }
-
+  const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    let message = response.statusText || "서버 요청 실패";
-
-    if (parsed && typeof parsed === "object" && "message" in parsed) {
-      const m = (parsed as { message?: unknown }).message;
-      if (typeof m === "string" && m.trim()) message = m;
-    }
-
+    const message = payload?.message || response.statusText || "인증 요청 실패";
     throw new Error(message);
   }
 
-  return parsed as T;
+  return payload as T;
 }
 
 function makeUser(payload: AuthResponsePayload): AuthUser {
@@ -126,35 +120,32 @@ function makeUser(payload: AuthResponsePayload): AuthUser {
     email: payload.email,
     name: payload.name,
     provider: payload.provider,
-    notificationsEnabled: payload.notificationsEnabled ?? true,
+    notificationsEnabled: Boolean(payload.notificationsEnabled),
   };
 }
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  const saved = storedAuth();
+  const initialStoredAuth = useMemo(() => storedAuth(), []);
 
-  const [user, setUser] = useState<AuthUser | null>(saved?.user ?? null);
-  const [token, setToken] = useState<string | null>(saved?.token ?? null);
-  const [status, setStatus] = useState<AuthStatus>(
-    saved ? "authenticated" : "idle"
-  );
+  const [user, setUser] = useState<AuthUser | null>(initialStoredAuth?.user ?? null);
+  const [token, setToken] = useState<string | null>(initialStoredAuth?.token ?? null);
+  const [refreshToken, setRefreshToken] = useState<string | null>(initialStoredAuth?.refreshToken ?? null);
+  const [status, setStatus] = useState<AuthStatus>(initialStoredAuth ? "loading" : "idle");
   const [error, setError] = useState<string | null>(null);
+  const refreshPromiseRef = useRef<Promise<boolean> | null>(null);
+  const restorationRef = useRef(false);
 
   useEffect(() => {
-    persistAuth(user && token ? { user, token } : null);
-  }, [user, token]);
+    persistAuth(user && token && refreshToken ? { user, token, refreshToken } : null);
+  }, [user, token, refreshToken]);
 
   const updateState = useCallback((payload: AuthResponsePayload) => {
     const nextUser = makeUser(payload);
-
     setUser(nextUser);
     setToken(payload.accessToken);
+    setRefreshToken(payload.refreshToken);
     setStatus("authenticated");
     setError(null);
-
-    // useEffect에서도 동기화하지만, 즉시 반영 원하면 유지 가능
-    persistAuth({ user: nextUser, token: payload.accessToken });
-
     return nextUser;
   }, []);
 
@@ -162,16 +153,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     async (credentials: LoginCredentials) => {
       setStatus("loading");
       setError(null);
-
       try {
-        const response = await requestAuth<AuthResponsePayload>(
-          "/signin",
-          credentials
-        );
+        const response = await requestAuth<AuthResponsePayload>("/signin", credentials);
         return updateState(response);
       } catch (reason) {
-        const message =
-          reason instanceof Error ? reason.message : "로그인에 실패했습니다.";
+        const message = reason instanceof Error ? reason.message : "로그인 실패";
         setStatus("error");
         setError(message);
         throw reason;
@@ -184,16 +170,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     async (credentials: SignUpCredentials) => {
       setStatus("loading");
       setError(null);
-
       try {
-        const response = await requestAuth<AuthResponsePayload>(
-          "/signup",
-          credentials
-        );
+        const response = await requestAuth<AuthResponsePayload>("/signup", credentials);
         return updateState(response);
       } catch (reason) {
-        const message =
-          reason instanceof Error ? reason.message : "회원가입에 실패했습니다.";
+        const message = reason instanceof Error ? reason.message : "회원가입 실패";
         setStatus("error");
         setError(message);
         throw reason;
@@ -205,14 +186,54 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const logout = useCallback(() => {
     setUser(null);
     setToken(null);
+    setRefreshToken(null);
+    refreshPromiseRef.current = null;
     setStatus("idle");
     setError(null);
     persistAuth(null);
   }, []);
 
+  const refreshTokens = useCallback(async (): Promise<boolean> => {
+    if (!refreshToken) return false;
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+
+    const promise = (async () => {
+      try {
+        const response = await requestAuth<AuthResponsePayload>("/refresh", { refreshToken });
+        updateState(response);
+        return true;
+      } catch {
+        logout();
+        return false;
+      } finally {
+        refreshPromiseRef.current = null;
+      }
+    })();
+
+    refreshPromiseRef.current = promise;
+    return promise;
+  }, [refreshToken, logout, updateState]);
+
+  useEffect(() => {
+    if (!initialStoredAuth || restorationRef.current) return;
+    restorationRef.current = true;
+    setStatus("loading");
+    refreshTokens().catch(() => undefined);
+  }, [initialStoredAuth, refreshTokens]);
+
   const value = useMemo(
-    () => ({ user, token, status, error, signIn, signUp, logout }),
-    [user, token, status, error, signIn, signUp, logout]
+    () => ({
+      user,
+      token,
+      refreshToken,
+      status,
+      error,
+      signIn,
+      signUp,
+      logout,
+      refreshTokens,
+    }),
+    [user, token, refreshToken, status, error, signIn, signUp, logout, refreshTokens]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
