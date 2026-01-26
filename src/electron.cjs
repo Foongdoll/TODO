@@ -38,6 +38,7 @@ const TODO_DB_FILE = () => path.join(app.getPath("userData"), "todos.db");
 
 let db = null;
 let dbInitPromise = null;
+let schemaReady = false;
 
 // ---------- sqlite3 promise wrappers ----------
 function openSqlite(filePath) {
@@ -95,19 +96,21 @@ async function ensureColumn(table, column, declaration) {
 }
 
 async function initTodoStore() {
-  if (db) return;
+  if (schemaReady) return;
   if (dbInitPromise) {
     await dbInitPromise;
     return;
   }
   dbInitPromise = (async () => {
-    const instance = await openSqlite(TODO_DB_FILE());
-    instance.configure("busyTimeout", 5000);
-    db = instance;
+    if (!db) {
+      const instance = await openSqlite(TODO_DB_FILE());
+      instance.configure("busyTimeout", 5000);
+      db = instance;
 
-    await run("PRAGMA journal_mode=WAL;");
-    await run("PRAGMA synchronous=NORMAL;");
-    await run("PRAGMA busy_timeout=5000;");
+      await run("PRAGMA journal_mode=WAL;");
+      await run("PRAGMA synchronous=NORMAL;");
+      await run("PRAGMA busy_timeout=5000;");
+    }
 
     // schema
     await run(`
@@ -124,6 +127,7 @@ async function initTodoStore() {
       content TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'TODO',
       isDaily INTEGER NOT NULL DEFAULT 0,
+      isMonthly INTEGER NOT NULL DEFAULT 0,
       date TEXT NOT NULL,
       ord INTEGER NOT NULL DEFAULT 0,
       refs TEXT NOT NULL DEFAULT '[]',
@@ -139,6 +143,7 @@ async function initTodoStore() {
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status);`);
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_linked_note ON todos(linkedNoteId);`);
     await run(`CREATE INDEX IF NOT EXISTS idx_todos_daily ON todos(isDaily);`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_todos_monthly ON todos(isMonthly);`);
 
     await run(`
     CREATE TABLE IF NOT EXISTS note_folders (
@@ -191,6 +196,7 @@ async function initTodoStore() {
 
     await ensureColumn("todos", "linkedNoteId", "linkedNoteId TEXT");
     await ensureColumn("todos", "isDaily", "isDaily INTEGER NOT NULL DEFAULT 0");
+    await ensureColumn("todos", "isMonthly", "isMonthly INTEGER NOT NULL DEFAULT 0");
     await ensureColumn("notes", "contentTiptap", "contentTiptap TEXT");
 
     // meta defaults
@@ -199,6 +205,8 @@ async function initTodoStore() {
       await run(`INSERT INTO meta(key,value) VALUES('version','1')`);
       await run(`INSERT INTO meta(key,value) VALUES('updatedAt', ?)`, [new Date().toISOString()]);
     }
+
+    schemaReady = true;
   })();
 
   try {
@@ -215,15 +223,17 @@ async function loadTodosByDate(selectedDate) {
   const rows = await all(
     `
     SELECT
-      id, title, content, status, isDaily, date,
+      id, title, content, status, isDaily, isMonthly, date,
       ord AS "order",
       refs, rels, attachments, linkedNoteId,
       createdAt, updatedAt
     FROM todos
-    WHERE date = ? OR isDaily = 1
-    ORDER BY isDaily DESC, ord ASC, updatedAt ASC
+    WHERE date = ?
+      OR isDaily = 1
+      OR (isMonthly = 1 AND substr(date, 9, 2) = substr(?, 9, 2))
+    ORDER BY isDaily DESC, isMonthly DESC, ord ASC, updatedAt ASC
     `,
-    [selectedDate]
+    [selectedDate, selectedDate]
   );
 
   return rows.map((r) => ({
@@ -232,6 +242,7 @@ async function loadTodosByDate(selectedDate) {
     content: r.content,
     status: r.status,
     isDaily: Boolean(r.isDaily),
+    isMonthly: Boolean(r.isMonthly),
     date: r.date,
     order: r.order,
     refs: safeJsonParseArray(r.refs),
@@ -249,7 +260,7 @@ async function loadTodoSummaryIndex() {
 
   const rows = await all(`
     SELECT
-      id, title, status, isDaily, date,
+      id, title, status, isDaily, isMonthly, date,
       ord AS "order",
       linkedNoteId,
       createdAt, updatedAt
@@ -262,6 +273,7 @@ async function loadTodoSummaryIndex() {
     title: r.title,
     status: r.status,
     isDaily: Boolean(r.isDaily),
+    isMonthly: Boolean(r.isMonthly),
     date: r.date,
     order: r.order,
     linkedNoteId: r.linkedNoteId ?? null,
@@ -280,13 +292,14 @@ async function upsertTodoRow(todo) {
   await run(
     `
     INSERT INTO todos
-    (id, title, content, status, isDaily, date, ord, refs, rels, attachments, linkedNoteId, createdAt, updatedAt)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    (id, title, content, status, isDaily, isMonthly, date, ord, refs, rels, attachments, linkedNoteId, createdAt, updatedAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       title=excluded.title,
       content=excluded.content,
       status=excluded.status,
       isDaily=excluded.isDaily,
+      isMonthly=excluded.isMonthly,
       date=excluded.date,
       ord=excluded.ord,
       refs=excluded.refs,
@@ -301,6 +314,7 @@ async function upsertTodoRow(todo) {
       String(todo.content ?? ""),
       String(todo.status ?? "TODO"),
       todo.isDaily ? 1 : 0,
+      todo.isMonthly ? 1 : 0,
       String(todo.date ?? ""),
       Number.isFinite(todo.order) ? todo.order : 0,
       toJsonArray(todo.refs),

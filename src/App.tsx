@@ -76,6 +76,7 @@ type Todo = {
   content: string; // markdown
   status: TodoStatus;
   isDaily: boolean;
+  isMonthly: boolean;
   date: string; // YYYY-MM-DD
   order: number;
   refs: string[];
@@ -98,6 +99,16 @@ type NoteSummary = {
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 const toYMD = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const dayOfMonth = (ymd: string) => Number(ymd.slice(8, 10));
+const isMonthlyMatch = (item: { isMonthly?: boolean; date: string }, ymd: string) =>
+  Boolean(item.isMonthly) && dayOfMonth(item.date) === dayOfMonth(ymd);
+const buildMonthlyOccurrence = (baseYmd: string, year: number, monthIndex: number) => {
+  const day = dayOfMonth(baseYmd);
+  if (!Number.isFinite(day) || day <= 0) return null;
+  const candidate = new Date(year, monthIndex, day);
+  if (candidate.getMonth() !== monthIndex) return null;
+  return toYMD(candidate);
+};
 const nowIso = () => new Date().toISOString();
 const uid = () =>
   globalThis.crypto?.randomUUID?.() ?? `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
@@ -354,6 +365,7 @@ function normalizeTodo(raw: Todo): Todo {
   return {
     ...rest,
     isDaily: Boolean(raw.isDaily),
+    isMonthly: Boolean(raw.isMonthly),
     refs: Array.isArray(raw.refs) ? raw.refs : [],
     rels: Array.isArray(raw.rels) ? raw.rels : [],
     attachments: [...normalizedAttachments, ...legacyAttachments],
@@ -367,6 +379,7 @@ function toSummary(todo: Todo): TodoSummary {
     title: todo.title,
     status: todo.status,
     isDaily: todo.isDaily,
+    isMonthly: todo.isMonthly,
     date: todo.date,
     order: todo.order,
     linkedNoteId: todo.linkedNoteId ?? null,
@@ -384,6 +397,7 @@ function normalizeSummary(raw: TodoSummary): TodoSummary {
     title: String(raw.title ?? ""),
     status,
     isDaily: Boolean(raw.isDaily),
+    isMonthly: Boolean(raw.isMonthly),
     date: String(raw.date ?? ""),
     order: Number.isFinite(raw.order) ? raw.order : 0,
     linkedNoteId: raw.linkedNoteId ?? null,
@@ -622,24 +636,44 @@ export default function App() {
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
   }, [dayTodos]);
 
-  const dateTodos = useMemo(() => {
+  const monthlyTodos = useMemo(() => {
     return dayTodos
-      .filter((t) => !t.isDaily && t.date === selectedDate)
+      .filter((t) => isMonthlyMatch(t, selectedDate))
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
   }, [dayTodos, selectedDate]);
 
-  const todosForDay = useMemo(() => [...dailyTodos, ...dateTodos], [dailyTodos, dateTodos]);
+  const dateTodos = useMemo(() => {
+    return dayTodos
+      .filter((t) => !t.isDaily && !t.isMonthly && t.date === selectedDate)
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
+  }, [dayTodos, selectedDate]);
+
+  const todosForDay = useMemo(
+    () => [...dailyTodos, ...monthlyTodos, ...dateTodos],
+    [dailyTodos, monthlyTodos, dateTodos]
+  );
 
   const todosByDate = useMemo(() => {
     const m = new Map<string, TodoSummary[]>();
+    const year = calendarMonth.getFullYear();
+    const monthIndex = calendarMonth.getMonth();
     for (const t of summaryTodos) {
       const arr = m.get(t.date) ?? [];
       arr.push(t);
       m.set(t.date, arr);
+      if (t.isMonthly) {
+        const occurrence = buildMonthlyOccurrence(t.date, year, monthIndex);
+        if (occurrence && occurrence !== t.date) {
+          const monthArr = m.get(occurrence) ?? [];
+          monthArr.push({ ...t, date: occurrence });
+          m.set(occurrence, monthArr);
+        }
+      }
     }
     return m;
-  }, [summaryTodos]);
+  }, [summaryTodos, calendarMonth]);
 
   const dayCounts = useMemo(() => {
     const counts: Record<TodoStatus, number> = {
@@ -820,7 +854,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedId) return;
     const match = dayTodos.find((t) => t.id === selectedId);
-    if (!match || (!match.isDaily && match.date !== selectedDate)) {
+    if (!match || (!match.isDaily && !isMonthlyMatch(match, selectedDate) && match.date !== selectedDate)) {
       setSelectedId(null);
       setPanelOpen(false);
     }
@@ -893,7 +927,7 @@ export default function App() {
   const applyTodoUpdate = (todo: Todo, options?: { immediate?: boolean }) => {
     setDayTodos((prev) => {
       const next = prev.map((t) => (t.id === todo.id ? todo : t));
-      return next.filter((t) => t.date === selectedDate || t.isDaily);
+      return next.filter((t) => t.date === selectedDate || t.isDaily || isMonthlyMatch(t, selectedDate));
     });
     upsertSummary(todo);
     if (options?.immediate) {
@@ -951,7 +985,11 @@ export default function App() {
   const openTodoFromNote = (todoId: string) => {
     const summary = summaryTodos.find((item) => item.id === todoId);
     if (!summary) return;
-    const targetDate = summary.isDaily ? selectedDate : summary.date;
+    const selected = new Date(selectedDate);
+    const monthlyDate = summary.isMonthly
+      ? buildMonthlyOccurrence(summary.date, selected.getFullYear(), selected.getMonth())
+      : null;
+    const targetDate = summary.isDaily ? selectedDate : monthlyDate ?? summary.date;
     setSelectedDate(targetDate);
     setTab("LIST");
     setPendingTodoId(todoId);
@@ -970,6 +1008,7 @@ export default function App() {
       content: "",
       status: "TODO",
       isDaily: false,
+      isMonthly: false,
       date: selectedDate,
       order: maxOrder + 1,
       refs: [],
@@ -990,8 +1029,12 @@ export default function App() {
     const current = getTodoById(id);
     if (!current) return;
     const updated = { ...current, ...patch, updatedAt: nowIso() };
-    applyTodoUpdate(updated, { immediate: Object.prototype.hasOwnProperty.call(patch, "isDaily") });
-    if (patch.date && patch.date !== selectedDate && !updated.isDaily) {
+    applyTodoUpdate(updated, {
+      immediate:
+        Object.prototype.hasOwnProperty.call(patch, "isDaily") ||
+        Object.prototype.hasOwnProperty.call(patch, "isMonthly"),
+    });
+    if (patch.date && patch.date !== selectedDate && !updated.isDaily && !isMonthlyMatch(updated, selectedDate)) {
       setSelectedId(null);
       setPanelOpen(false);
     }
@@ -1386,6 +1429,26 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
+                {monthlyTodos.length > 0 ? (
+                  <div className="mb-4 rounded-2xl border border-sky-200/70 bg-sky-50/60 p-3">
+                    <div className="mb-2 flex items-center justify-between text-xs font-medium text-sky-900">
+                      <span>매달 할 일</span>
+                      <span>{monthlyTodos.length}개</span>
+                    </div>
+                    <div className="space-y-2">
+                      {monthlyTodos.map((t) => (
+                        <TodoRow
+                          key={t.id}
+                          todo={t}
+                          isSelected={t.id === selectedId}
+                          onClick={() => openPanel(t.id)}
+                          badgeText="매달"
+                          showDate={false}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <DndContext
                   sensors={sensors}
                   collisionDetection={closestCenter}
@@ -1396,7 +1459,7 @@ export default function App() {
                     <div className="space-y-2">
                       {dateTodos.length === 0 ? (
                         <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-500">
-                          {dailyTodos.length
+                          {dailyTodos.length || monthlyTodos.length
                             ? "선택한 날짜에 추가 할 일이 없습니다."
                             : `${selectedDate}에 등록된 할 일이 없습니다. 새로 추가하세요.`}
                         </div>
@@ -1539,15 +1602,37 @@ export default function App() {
                       </div>
                       <div className="space-y-2">
                         <label className="text-xs font-medium text-slate-700">반복</label>
-                        <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(selectedTodo.isDaily)}
-                            onChange={(e) => patchTodo(selectedTodo.id, { isDaily: e.target.checked })}
-                          />
-                          <span>매일</span>
-                        </label>
-                        <div className="text-[11px] text-slate-500">매일 할 일은 모든 날짜에 고정 표시됩니다.</div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(selectedTodo.isDaily)}
+                              onChange={(e) =>
+                                patchTodo(selectedTodo.id, {
+                                  isDaily: e.target.checked,
+                                  isMonthly: e.target.checked ? false : selectedTodo.isMonthly,
+                                })
+                              }
+                            />
+                            <span>매일</span>
+                          </label>
+                          <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(selectedTodo.isMonthly)}
+                              onChange={(e) =>
+                                patchTodo(selectedTodo.id, {
+                                  isMonthly: e.target.checked,
+                                  isDaily: e.target.checked ? false : selectedTodo.isDaily,
+                                })
+                              }
+                            />
+                            <span>매달</span>
+                          </label>
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          매일은 모든 날짜에, 매달은 같은 날짜에 표시됩니다.
+                        </div>
                       </div>
                     </div>
 
