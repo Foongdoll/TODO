@@ -126,6 +126,7 @@ export default function Chat() {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachmentResponse[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [imagePreview, setImagePreview] = useState<{ src: string; name: string } | null>(null);
   const [userNotifications, setUserNotifications] = useState(user?.notificationsEnabled ?? true);
   const [groupNameOpen, setGroupNameOpen] = useState(false);
   const [groupNameDraft, setGroupNameDraft] = useState("새 그룹");
@@ -270,6 +271,14 @@ export default function Chat() {
       scrollToBottom();
     }
   }, [messages.length, scrollToBottom, view]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImagePreview(null);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const sendRead = useCallback(
     (messageIds: string[]) => {
@@ -482,6 +491,24 @@ export default function Chat() {
           </div>
         </div>
       ) : null}
+      {imagePreview ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setImagePreview(null);
+            }
+          }}
+        >
+          <div className="max-h-[90vh] max-w-[90vw] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <img
+              src={imagePreview.src}
+              alt={imagePreview.name}
+              className="max-h-[90vh] max-w-[90vw] object-contain"
+            />
+          </div>
+        </div>
+      ) : null}
       {view === "list" ? (
         <aside className="flex h-full min-h-0 flex-col overflow-hidden">
           <div className="border-b border-slate-200/70 p-4">
@@ -628,9 +655,18 @@ export default function Chat() {
                 <div className="flex flex-col gap-3 overflow-auto">
                   {messages.map((message) =>
                     message.senderId === user.userId ? (
-                      <MessageOut key={message.messageId} message={message} room={activeRoom} />
+                      <MessageOut
+                        key={message.messageId}
+                        message={message}
+                        room={activeRoom}
+                        onImageClick={(src, name) => setImagePreview({ src, name })}
+                      />
                     ) : (
-                      <MessageIn key={message.messageId} message={message} />
+                      <MessageIn
+                        key={message.messageId}
+                        message={message}
+                        onImageClick={(src, name) => setImagePreview({ src, name })}
+                      />
                     )
                   )}
                 </div>
@@ -1120,20 +1156,34 @@ function ThreadRow({
 }
 
 
-function MessageIn({ message }: { message: ChatMessageResponse }) {
+function MessageIn({
+  message,
+  onImageClick,
+}: {
+  message: ChatMessageResponse;
+  onImageClick?: (src: string, name: string) => void;
+}) {
   return (
     <div className="flex max-w-[78%] flex-col items-start">
       <div className="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
         <div className="text-[11px] font-semibold text-slate-500">{message.senderName}</div>
         {message.content ? <div className="mt-1">{message.content}</div> : null}
-        <AttachmentList attachments={message.attachments} />
+        <AttachmentList attachments={message.attachments} onImageClick={onImageClick} />
       </div>
       <div className="mt-1 text-[11px] text-slate-400">{formatTime(message.createdAt)}</div>
     </div>
   );
 }
 
-function MessageOut({ message, room }: { message: ChatMessageResponse; room: ChatRoomSummaryResponse | null }) {
+function MessageOut({
+  message,
+  room,
+  onImageClick,
+}: {
+  message: ChatMessageResponse;
+  room: ChatRoomSummaryResponse | null;
+  onImageClick?: (src: string, name: string) => void;
+}) {
   const readCount = message.readUserIds?.length ?? 0;
   const memberCount = room?.members.length ?? 1;
   const isRead = memberCount > 1 && readCount >= memberCount - 1;
@@ -1142,7 +1192,7 @@ function MessageOut({ message, room }: { message: ChatMessageResponse; room: Cha
     <div className="ml-auto flex max-w-[78%] flex-col items-end">
       <div className="rounded-3xl border border-amber-200 bg-amber-100 px-4 py-3 text-sm text-amber-900">
         {message.content ? <div>{message.content}</div> : null}
-        <AttachmentList attachments={message.attachments} />
+        <AttachmentList attachments={message.attachments} onImageClick={onImageClick} />
       </div>
       <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-400">
         <span>{formatTime(message.createdAt)}</span>
@@ -1152,18 +1202,26 @@ function MessageOut({ message, room }: { message: ChatMessageResponse; room: Cha
   );
 }
 
-function AttachmentList({ attachments }: { attachments: ChatAttachmentResponse[] }) {
+function AttachmentList({
+  attachments,
+  onImageClick,
+}: {
+  attachments: ChatAttachmentResponse[];
+  onImageClick?: (src: string, name: string) => void;
+}) {
   if (!attachments?.length) return null;
   return (
     <div className="mt-2 space-y-2">
       {attachments.map((att) => {
         if (att.type === "IMAGE") {
+          const src = `${CHAT_FILE_BASE}${att.url}`;
           return (
             <img
               key={att.attachmentId}
-              src={`${CHAT_FILE_BASE}${att.url}`}
+              src={src}
               alt={att.name}
-              className="max-h-40 rounded-2xl border border-slate-200 object-cover"
+              className="max-h-40 cursor-zoom-in rounded-2xl border border-slate-200 object-cover"
+              onClick={() => onImageClick?.(src, att.name)}
             />
           );
         }

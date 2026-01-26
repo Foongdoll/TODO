@@ -245,4 +245,41 @@
   .tiptap .ProseMirror > * + * {
     @apply mt-2;
   }
+
+  .note-block {
+    position: relative;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .note-block:hover {
+    border-color: #cbd5f5;
+    box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.15);
+  }
+
+  .note-block__handle {
+    display: inline-flex;
+    height: 24px;
+    width: 24px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    background: #ffffff;
+    color: #94a3b8;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    cursor: grab;
+  }
+
+  .note-block:hover .note-block__handle {
+    opacity: 1;
+  }
+
+  .note-block__handle:active {
+    cursor: grabbing;
+  }
+
+  .note-block__handle svg {
+    pointer-events: none;
+  }
 }

@@ -29,6 +29,7 @@ import {
   FileText,
   Folder,
   FolderPlus,
+  GripVertical,
   Link2,
   Pencil,
   Save,
@@ -327,13 +328,31 @@ const remarkInlineTokens = () => {
   };
 };
 
+const stopPropagation = (event: React.SyntheticEvent) => {
+  event.stopPropagation();
+};
+
+const interactiveProps = {
+  onMouseDown: stopPropagation,
+  onClick: stopPropagation,
+  onPointerDown: stopPropagation,
+  onKeyDown: stopPropagation,
+  onKeyUp: stopPropagation,
+};
+
 const stopInteractiveEvent = (event: any) => {
   const target = event.target;
   if (!(target instanceof Element)) return false;
   return Boolean(target.closest("button, input, select, textarea"));
 };
 
-function SelectBlockView({ node, updateAttributes }: NodeViewProps) {
+const DragHandle = ({ label = "드래그로 이동" }: { label?: string }) => (
+  <div className="note-block__handle" data-drag-handle title={label} aria-hidden="true">
+    <GripVertical size={14} />
+  </div>
+);
+
+function SelectBlockView({ node, updateAttributes, editor }: NodeViewProps) {
   const label = String(node.attrs.label ?? "상태");
   const options = normalizeSelectOptions(node.attrs.options);
   const value = String(node.attrs.value ?? options[0] ?? "");
@@ -371,27 +390,34 @@ function SelectBlockView({ node, updateAttributes }: NodeViewProps) {
   };
 
   return (
-    <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+    <NodeViewWrapper className="note-block rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
       <div className="flex items-center justify-between">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-        <button
-          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
-          onClick={() => setIsEditing((prev) => !prev)}
-        >
-          {isEditing ? "닫기" : "편집"}
-        </button>
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+        </div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
       </div>
       {isEditing ? (
         <div className="mt-3 space-y-2">
           <input
             value={draftLabel}
             onChange={(event) => setDraftLabel(event.target.value)}
+            {...interactiveProps}
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
             placeholder="라벨"
           />
           <textarea
             value={draftOptions}
             onChange={(event) => setDraftOptions(event.target.value)}
+            {...interactiveProps}
             className="h-28 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
             placeholder="옵션을 줄바꿈으로 입력하세요."
           />
@@ -420,6 +446,8 @@ function SelectBlockView({ node, updateAttributes }: NodeViewProps) {
         <select
           value={value}
           onChange={(event) => updateAttributes({ value: event.target.value })}
+          {...interactiveProps}
+          disabled={!editor.isEditable}
           className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
         >
           {options.map((opt) => (
@@ -488,9 +516,12 @@ function ChartBlockView({ node, updateAttributes, editor }: NodeViewProps) {
   };
 
   return (
-    <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+    <NodeViewWrapper className="note-block rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
       <div className="flex items-center justify-between">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Chart</div>
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Chart</div>
+        </div>
         {editor.isEditable ? (
           <button
             className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
@@ -506,12 +537,14 @@ function ChartBlockView({ node, updateAttributes, editor }: NodeViewProps) {
           <input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
+            {...interactiveProps}
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
             placeholder="차트 제목"
           />
           <textarea
             value={draftData}
             onChange={(event) => setDraftData(event.target.value)}
+            {...interactiveProps}
             className="h-32 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
             placeholder='[{ "label": "A", "value": 10 }]'
           />
@@ -648,13 +681,16 @@ function CalloutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
 
   return (
     <NodeViewWrapper
-      className={`rounded-2xl border p-3 ${toneMeta.containerClass}`}
+      className={`note-block rounded-2xl border p-3 ${toneMeta.containerClass}`}
       contentEditable={false}
     >
       <div className="flex items-center justify-between">
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${toneMeta.badgeClass}`}>
-          {toneMeta.label}
-        </span>
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${toneMeta.badgeClass}`}>
+            {toneMeta.label}
+          </span>
+        </div>
         {editor.isEditable ? (
           <button
             className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
@@ -669,6 +705,7 @@ function CalloutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
           <select
             value={draftTone}
             onChange={(event) => setDraftTone(event.target.value)}
+            {...interactiveProps}
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
           >
             {Object.entries(CALLOUT_TONES).map(([key, meta]) => (
@@ -680,12 +717,14 @@ function CalloutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
           <input
             value={draftTitle}
             onChange={(event) => setDraftTitle(event.target.value)}
+            {...interactiveProps}
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
             placeholder="제목"
           />
           <textarea
             value={draftBody}
             onChange={(event) => setDraftBody(event.target.value)}
+            {...interactiveProps}
             className="h-24 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
             placeholder="내용"
           />
@@ -844,9 +883,12 @@ function LayoutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
   };
 
   return (
-    <NodeViewWrapper className="rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+    <NodeViewWrapper className="note-block rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
       <div className="flex items-center justify-between">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Layout</div>
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Layout</div>
+        </div>
         {editor.isEditable ? (
           <button
             className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
@@ -861,6 +903,7 @@ function LayoutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
           <select
             value={draftLayout}
             onChange={(event) => setDraftLayout(event.target.value)}
+            {...interactiveProps}
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
           >
             {LAYOUT_OPTIONS.map((option) => (
@@ -872,6 +915,7 @@ function LayoutBlockView({ node, updateAttributes, editor }: NodeViewProps) {
           <textarea
             value={draftItems}
             onChange={(event) => setDraftItems(event.target.value)}
+            {...interactiveProps}
             className="h-24 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
             placeholder="아이템을 줄바꿈으로 입력하세요."
           />
@@ -930,6 +974,363 @@ const LayoutBlock = Node.create({
   },
 });
 
+function MetricBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftLabel, setDraftLabel] = useState(String(node.attrs.label ?? "지표"));
+  const [draftValue, setDraftValue] = useState(String(node.attrs.value ?? "42"));
+  const [draftUnit, setDraftUnit] = useState(String(node.attrs.unit ?? ""));
+  const [draftNote, setDraftNote] = useState(String(node.attrs.note ?? ""));
+
+  useEffect(() => {
+    setDraftLabel(String(node.attrs.label ?? "지표"));
+    setDraftValue(String(node.attrs.value ?? "42"));
+    setDraftUnit(String(node.attrs.unit ?? ""));
+    setDraftNote(String(node.attrs.note ?? ""));
+  }, [node.attrs.label, node.attrs.value, node.attrs.unit, node.attrs.note]);
+
+  const handleApply = () => {
+    updateAttributes({
+      label: draftLabel.trim() || "지표",
+      value: draftValue.trim() || "0",
+      unit: draftUnit.trim(),
+      note: draftNote.trim(),
+    });
+    setIsEditing(false);
+  };
+
+  return (
+    <NodeViewWrapper className="note-block rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Metric</div>
+        </div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <input
+            value={draftLabel}
+            onChange={(event) => setDraftLabel(event.target.value)}
+            {...interactiveProps}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="라벨"
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              value={draftValue}
+              onChange={(event) => setDraftValue(event.target.value)}
+              {...interactiveProps}
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              placeholder="값"
+            />
+            <input
+              value={draftUnit}
+              onChange={(event) => setDraftUnit(event.target.value)}
+              {...interactiveProps}
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              placeholder="단위"
+            />
+          </div>
+          <textarea
+            value={draftNote}
+            onChange={(event) => setDraftNote(event.target.value)}
+            {...interactiveProps}
+            className="h-20 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+            placeholder="간단 메모"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={handleApply}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftLabel(String(node.attrs.label ?? "지표"));
+                setDraftValue(String(node.attrs.value ?? "42"));
+                setDraftUnit(String(node.attrs.unit ?? ""));
+                setDraftNote(String(node.attrs.note ?? ""));
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1">
+          <div className="text-xs font-medium text-slate-500">{String(node.attrs.label ?? "지표")}</div>
+          <div className="flex items-end gap-1">
+            <div className="text-2xl font-semibold text-slate-900">{String(node.attrs.value ?? "0")}</div>
+            {node.attrs.unit ? <div className="text-sm text-slate-500">{String(node.attrs.unit)}</div> : null}
+          </div>
+          {node.attrs.note ? (
+            <div className="text-xs text-slate-500">{String(node.attrs.note)}</div>
+          ) : null}
+        </div>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const MetricBlock = Node.create({
+  name: "metricBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      label: { default: "지표" },
+      value: { default: "42" },
+      unit: { default: "" },
+      note: { default: "" },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-metric-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-metric-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(MetricBlockView, { stopEvent: stopInteractiveEvent });
+  },
+});
+
+function ProgressBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const rawValue = Number(node.attrs.value ?? 0);
+  const value = Number.isFinite(rawValue) ? Math.max(0, Math.min(100, rawValue)) : 0;
+  const label = String(node.attrs.label ?? "진행률");
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftLabel, setDraftLabel] = useState(label);
+  const [draftValue, setDraftValue] = useState(String(value));
+
+  useEffect(() => {
+    setDraftLabel(label);
+    setDraftValue(String(value));
+  }, [label, value]);
+
+  const applyValue = (next: number) => {
+    const clamped = Math.max(0, Math.min(100, next));
+    updateAttributes({ label: draftLabel.trim() || "진행률", value: clamped });
+  };
+
+  return (
+    <NodeViewWrapper className="note-block rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Progress</div>
+        </div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <input
+            value={draftLabel}
+            onChange={(event) => setDraftLabel(event.target.value)}
+            {...interactiveProps}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="라벨"
+          />
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Number(draftValue) || 0}
+              onChange={(event) => setDraftValue(event.target.value)}
+              {...interactiveProps}
+              className="w-full"
+            />
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={draftValue}
+              onChange={(event) => setDraftValue(event.target.value)}
+              {...interactiveProps}
+              className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                const next = Number(draftValue);
+                applyValue(Number.isFinite(next) ? next : 0);
+                setIsEditing(false);
+              }}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftLabel(label);
+                setDraftValue(String(value));
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <div className="text-sm font-semibold text-slate-800">{label}</div>
+          <div className="h-2 w-full rounded-full bg-slate-100">
+            <div className="h-2 rounded-full bg-emerald-400" style={{ width: `${value}%` }} />
+          </div>
+          <div className="text-xs text-slate-500">{value}%</div>
+        </div>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const ProgressBlock = Node.create({
+  name: "progressBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      label: { default: "진행률" },
+      value: { default: 50 },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-progress-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-progress-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(ProgressBlockView, { stopEvent: stopInteractiveEvent });
+  },
+});
+
+function QuoteBlockView({ node, updateAttributes, editor }: NodeViewProps) {
+  const quote = String(node.attrs.quote ?? "인용문을 입력하세요.");
+  const author = String(node.attrs.author ?? "");
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftQuote, setDraftQuote] = useState(quote);
+  const [draftAuthor, setDraftAuthor] = useState(author);
+
+  useEffect(() => {
+    setDraftQuote(quote);
+    setDraftAuthor(author);
+  }, [quote, author]);
+
+  const handleApply = () => {
+    updateAttributes({
+      quote: draftQuote.trim() || "인용문을 입력하세요.",
+      author: draftAuthor.trim(),
+    });
+    setIsEditing(false);
+  };
+
+  return (
+    <NodeViewWrapper className="note-block rounded-2xl border border-slate-200 bg-white p-3" contentEditable={false}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DragHandle />
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Quote</div>
+        </div>
+        {editor.isEditable ? (
+          <button
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px]"
+            onClick={() => setIsEditing((prev) => !prev)}
+          >
+            {isEditing ? "닫기" : "편집"}
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div className="mt-3 space-y-2">
+          <textarea
+            value={draftQuote}
+            onChange={(event) => setDraftQuote(event.target.value)}
+            {...interactiveProps}
+            className="h-24 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+            placeholder="인용문"
+          />
+          <input
+            value={draftAuthor}
+            onChange={(event) => setDraftAuthor(event.target.value)}
+            {...interactiveProps}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="작성자"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={handleApply}
+            >
+              적용
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+              onClick={() => {
+                setIsEditing(false);
+                setDraftQuote(quote);
+                setDraftAuthor(author);
+              }}
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <div className="text-sm italic text-slate-700">“{quote}”</div>
+          {author ? <div className="text-xs text-slate-500">— {author}</div> : null}
+        </div>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const QuoteBlock = Node.create({
+  name: "quoteBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      quote: { default: "인용문을 입력하세요." },
+      author: { default: "" },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-quote-block]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-quote-block": "true" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(QuoteBlockView, { stopEvent: stopInteractiveEvent });
+  },
+});
+
 export default function Note({
   focusNoteId,
   onFocusHandled,
@@ -959,10 +1360,12 @@ export default function Note({
   const [linkDraft, setLinkDraft] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const selectedNoteRef = useRef<NoteDetail | null>(null);
   const isEditingRef = useRef(false);
   const isFolderComposingRef = useRef(false);
   const isTitleComposingRef = useRef(false);
+  const pendingFolderCommitRef = useRef<string | null>(null);
 
   const foldersByParent = useMemo(() => {
     const map = new Map<string | null, NoteFolder[]>();
@@ -1022,6 +1425,9 @@ export default function Note({
       ChartBlock,
       CalloutBlock,
       LayoutBlock,
+      MetricBlock,
+      ProgressBlock,
+      QuoteBlock,
     ],
     []
   );
@@ -1327,9 +1733,10 @@ export default function Note({
 
   const handleSaveEdit = async () => {
     if (!selectedNote || !editor || !hasNotesBridge) return;
+    const rawTitle = titleInputRef.current?.value ?? draftTitle;
     const updated: NoteDetail = {
       ...selectedNote,
-      title: draftTitle.trim() || "제목 없는 노트",
+      title: rawTitle.trim() || "제목 없는 노트",
       folderId: draftFolderId ?? null,
       content: editor.getText({ blockSeparator: "\n" }),
       contentTiptap: editor.getJSON(),
@@ -1432,9 +1839,9 @@ export default function Note({
     await refreshTree();
   };
 
-  const handleFolderRenameCommit = async (folderId: string) => {
+  const handleFolderRenameCommit = async (folderId: string, nextName?: string) => {
     if (!hasNotesBridge) return;
-    const name = folderDraftName.trim() || "제목 없는 폴더";
+    const name = (nextName ?? folderDraftName).trim() || "제목 없는 폴더";
     const existing = folders.find((folder) => folder.id === folderId);
     await window.api.notes.upsertFolder({
       id: folderId,
@@ -1445,6 +1852,7 @@ export default function Note({
     });
     setFolderEditId(null);
     setFolderDraftName("");
+    pendingFolderCommitRef.current = null;
     await refreshTree();
   };
 
@@ -1594,6 +2002,18 @@ export default function Note({
         label: "Layout Block",
         action: () => editor.chain().focus().insertContent({ type: "layoutBlock" }).run(),
       },
+      {
+        label: "Metric Block",
+        action: () => editor.chain().focus().insertContent({ type: "metricBlock" }).run(),
+      },
+      {
+        label: "Progress Block",
+        action: () => editor.chain().focus().insertContent({ type: "progressBlock" }).run(),
+      },
+      {
+        label: "Quote Block",
+        action: () => editor.chain().focus().insertContent({ type: "quoteBlock" }).run(),
+      },
     ]
     : [];
 
@@ -1634,15 +2054,29 @@ export default function Note({
               }}
               onCompositionEnd={(event) => {
                 isFolderComposingRef.current = false;
-                setFolderDraftName(event.currentTarget.value);
+                const nextValue = event.currentTarget.value;
+                setFolderDraftName(nextValue);
+                if (pendingFolderCommitRef.current !== null) {
+                  const pendingValue = pendingFolderCommitRef.current;
+                  pendingFolderCommitRef.current = null;
+                  void handleFolderRenameCommit(folder.id, pendingValue);
+                }
               }}
-              onBlur={() => handleFolderRenameCommit(folder.id)}
+              onBlur={(event) => {
+                const nextValue = event.currentTarget.value;
+                if (isFolderComposingRef.current) {
+                  pendingFolderCommitRef.current = nextValue;
+                  return;
+                }
+                void handleFolderRenameCommit(folder.id, nextValue);
+              }}
               onKeyDown={(e) => {
                 if (isFolderComposingRef.current) return;
                 if (e.key === "Enter") handleFolderRenameCommit(folder.id);
                 if (e.key === "Escape") {
                   setFolderEditId(null);
                   setFolderDraftName("");
+                  pendingFolderCommitRef.current = null;
                 }
               }}
               onClick={(e) => e.stopPropagation()}
@@ -1798,6 +2232,7 @@ export default function Note({
                     </div>
                     {isEditing ? (
                       <input
+                        ref={titleInputRef}
                         value={draftTitle}
                         onChange={(event) => setDraftTitle(event.target.value)}
                         onCompositionStart={() => {
@@ -2023,21 +2458,21 @@ export default function Note({
                         <button
                           className={toolbarButtonClass()}
                           onClick={() => editor.chain().focus().addRowAfter().run()}
-                          disabled={!editor.isActive("table")}
+                          disabled={!editor.can().addRowAfter()}
                         >
                           행+
                         </button>
                         <button
                           className={toolbarButtonClass()}
                           onClick={() => editor.chain().focus().addColumnAfter().run()}
-                          disabled={!editor.isActive("table")}
+                          disabled={!editor.can().addColumnAfter()}
                         >
                           열+
                         </button>
                         <button
                           className={toolbarButtonClass()}
                           onClick={() => editor.chain().focus().deleteTable().run()}
-                          disabled={!editor.isActive("table")}
+                          disabled={!editor.can().deleteTable()}
                         >
                           표 삭제
                         </button>
@@ -2068,6 +2503,24 @@ export default function Note({
                           onClick={() => editor.chain().focus().insertContent({ type: "layoutBlock" }).run()}
                         >
                           Layout
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "metricBlock" }).run()}
+                        >
+                          Metric
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "progressBlock" }).run()}
+                        >
+                          Progress
+                        </button>
+                        <button
+                          className={toolbarButtonClass()}
+                          onClick={() => editor.chain().focus().insertContent({ type: "quoteBlock" }).run()}
+                        >
+                          Quote
                         </button>
                       </div>
                     </div>

@@ -6,6 +6,7 @@ export type TodoSummary = {
   title: string;
   status: TodoStatus;
   isDaily?: boolean;
+  isMonthly?: boolean;
   date: string;
   order: number;
   linkedNoteId?: string | null;
